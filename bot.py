@@ -4,39 +4,10 @@ import re
 import logging
 from time import sleep
 from instagrapi import Client
-from instagrapi.exceptions import LoginRequired
+from pydantic_core import ValidationError # <-- IMPORT THIS
 
-# --- Setup logging ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler("bot.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+# ... (rest of your setup code is fine) ...
 
-# --- Constants ---
-SESSION_FILE = "session.json"
-PROCESSED_FILE = "processed_messages.json"
-REEL_REGEX = re.compile(r"https?://www\.instagram\.com/reel/[A-Za-z0-9_\-]+/?")
-
-# --- Utils ---
-def save_json(data, filename):
-    with open(filename, "w") as f:
-        json.dump(data, f)
-
-def load_json(filename):
-    if os.path.exists(filename):
-        with open(filename, "r") as f:
-            return json.load(f)
-    return []
-
-def human_delay():
-    sleep(3)
-
-# --- Bot Class ---
 class InstagramRepostBot:
     def __init__(self):
         self.cl = Client()
@@ -45,6 +16,7 @@ class InstagramRepostBot:
         self.processed = set(load_json(PROCESSED_FILE))
 
     def login(self):
+        # ... (your login function is fine) ...
         if os.path.exists(SESSION_FILE):
             try:
                 self.cl.load_settings(SESSION_FILE)
@@ -58,16 +30,28 @@ class InstagramRepostBot:
         self.cl.login(self.username, self.password)
         self.cl.dump_settings(SESSION_FILE)
 
-    def process_dms(self):
-        threads = self.cl.direct_threads()
-        reposts = 0
 
+    def process_dms(self):
+        threads = [] # Initialize as empty list
+        try:
+            # --- THIS IS THE CRITICAL PART ---
+            # The error happens here, so we wrap it
+            threads = self.cl.direct_threads()
+            # ---------------------------------
+        except ValidationError as e:
+            logger.error(f"CRITICAL: Failed to parse DM threads from Instagram. The API might have changed. Error: {e}")
+            logger.error("Aborting this run to prevent further issues.")
+            return # Exit the function gracefully
+
+        reposts = 0
         for thread in threads:
             for msg in thread.messages:
                 msg_id = str(msg.id)
                 if msg_id in self.processed:
                     continue
 
+                # The rest of your logic from here is good because
+                # it already has its own error handling for uploads.
                 text = msg.text or ""
 
                 # Case 1: Reel URL in text
@@ -76,38 +60,41 @@ class InstagramRepostBot:
                     url = m.group(0)
                     logger.info(f"🎯 Reposting reel URL: {url}")
                     try:
-                        self.cl.clip_upload_by_url(url, caption="")
+                        # Using clip_upload_by_url for reels from DMs is more reliable
+                        media_pk = self.cl.media_pk_from_url(url)
+                        self.cl.media_info(media_pk) # Check if media is valid
+                        self.cl.clip_repost(media_pk)
                         self.processed.add(msg_id)
                         reposts += 1
                         human_delay()
                     except Exception as e:
-                        logger.warning(f"❌ Failed to repost reel from URL: {e}")
+                        logger.warning(f"❌ Failed to repost reel from URL {url}: {e}")
                     continue
 
                 # Case 2: Forwarded reel (media_share)
                 if hasattr(msg, "media_share") and msg.media_share:
                     media = msg.media_share
-                    if getattr(media, "video_url", None):
-                        logger.info(f"↪️ Reposting forwarded reel: {media.video_url}")
+                    if getattr(media, "media_type", 0) == 2: # 2 means video/reel
+                        logger.info(f"↪️ Reposting forwarded reel: {media.pk}")
                         try:
-                            self.cl.clip_upload_by_url(media.video_url, caption="")
+                            self.cl.clip_repost(media.pk)
                             self.processed.add(msg_id)
                             reposts += 1
                             human_delay()
                         except Exception as e:
-                            logger.warning(f"❌ Failed to repost forwarded reel: {e}")
+                            logger.warning(f"❌ Failed to repost forwarded reel {media.pk}: {e}")
                         continue
-
+                    
                     # Case 3: Image with optional caption
-                    if getattr(media, "thumbnail_url", None):
-                        logger.info(f"🖼️ Reposting image post")
+                    if getattr(media, "media_type", 0) == 1: # 1 means photo
+                        logger.info(f"🖼️ Reposting image post: {media.pk}")
                         try:
-                            self.cl.photo_upload_by_url(media.thumbnail_url, caption=text)
+                            self.cl.photo_repost(media.pk, caption=text)
                             self.processed.add(msg_id)
                             reposts += 1
                             human_delay()
                         except Exception as e:
-                            logger.warning(f"❌ Failed to repost image: {e}")
+                            logger.warning(f"❌ Failed to repost image {media.pk}: {e}")
                         continue
 
         logger.info(f"✅ Run complete. Total reposts: {reposts}")
