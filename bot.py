@@ -1,92 +1,65 @@
-#!/usr/bin/env python3
-"""
-Debug Version – Instagram DM Repost Bot
-• Safely skips reels with unsupported metadata (original_sound_info bug)
-• Reposts:
-    – Reel links shared in DM text
-    – Photo attachments + accompanying text as caption
-"""
-
 import os
-import re
 import json
-import time
-import random
+import re
 import logging
-
+from time import sleep
 from instagrapi import Client
-from instagrapi.exceptions import LoginRequired, ChallengeRequired, PleaseWaitFewMinutes
-from pydantic import ValidationError
-import instagrapi.extractors as extractors
+from instagrapi.exceptions import LoginRequired
 
-# ─── Patch the internal extractor to swallow ValidationError ─────────────────
-_orig_extract_media_v1 = extractors.extract_media_v1
-
-def _safe_extract_media_v1(clip):
-    try:
-        return _orig_extract_media_v1(clip)
-    except ValidationError as e:
-        logging.warning(f"⚠️ Skipping unsupported reel metadata: {e}")
-        return None
-
-extractors.extract_media_v1 = _safe_extract_media_v1
-# ──────────────────────────────────────────────────────────────────────────────
-
-# ─── Logging Setup ────────────────────────────────────────────────────────────
+# --- Setup logging ---
 logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
-# ─── Configuration ────────────────────────────────────────────────────────────
-USERNAME        = os.getenv("INSTAGRAM_USERNAME")
-PASSWORD        = os.getenv("INSTAGRAM_PASSWORD")
-SESSION_FILE    = "session.json"
-PROCESSED_FILE  = "processed_messages.json"
-MAX_REPOSTS     = 5
-REEL_REGEX      = re.compile(r"https?://(?:www\.)?instagram\.com/reel/[A-Za-z0-9_-]+/?")
+# --- Constants ---
+SESSION_FILE = "session.json"
+PROCESSED_FILE = "processed_messages.json"
+REEL_REGEX = re.compile(r"https?://www\.instagram\.com/reel/[A-Za-z0-9_\-]+/?")
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
-def human_delay():
-    time.sleep(random.uniform(1, 3))
-
-def load_json(path):
-    if os.path.exists(path):
-        return json.load(open(path))
-    return []
-
-def save_json(path, data):
-    with open(path, "w") as f:
+# --- Utils ---
+def save_json(data, filename):
+    with open(filename, "w") as f:
         json.dump(data, f)
 
-# ─── Bot Class ────────────────────────────────────────────────────────────────
-class InstagramBot:
+def load_json(filename):
+    if os.path.exists(filename):
+        with open(filename, "r") as f:
+            return json.load(f)
+    return []
+
+def human_delay():
+    sleep(3)
+
+# --- Bot Class ---
+class InstagramRepostBot:
     def __init__(self):
-        if not USERNAME or not PASSWORD:
-            logger.error("Missing INSTAGRAM_USERNAME or INSTAGRAM_PASSWORD")
-            exit(1)
         self.cl = Client()
+        self.username = os.getenv("INSTAGRAM_USERNAME")
+        self.password = os.getenv("INSTAGRAM_PASSWORD")
         self.processed = set(load_json(PROCESSED_FILE))
 
     def login(self):
-        # Try session file
         if os.path.exists(SESSION_FILE):
             try:
                 self.cl.load_settings(SESSION_FILE)
-                self.cl.login(USERNAME, PASSWORD)  # validation call
-                logger.info("✅ Loaded and validated session.json")
+                self.cl.login(self.username, self.password)
+                logger.info("✅ Session restored.")
                 return
-            except Exception:
-                logger.warning("⚠️ session.json expired, performing fresh login")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to load session: {e}")
 
-        # Fresh login + save
-        self.cl.login(USERNAME, PASSWORD)
+        logger.info("🔐 Logging in fresh.")
+        self.cl.login(self.username, self.password)
         self.cl.dump_settings(SESSION_FILE)
-        logger.info("✅ Logged in fresh and saved session.json")
 
     def process_dms(self):
-        threads = self.cl.direct_threads(amount=20)
+        threads = self.cl.direct_threads()
         reposts = 0
 
         for thread in threads:
@@ -97,53 +70,51 @@ class InstagramBot:
 
                 text = msg.text or ""
 
-                # 1) Reel link in text
+                # Case 1: Reel URL in text
                 m = REEL_REGEX.search(text)
-                if m and reposts < MAX_REPOSTS:
+                if m:
                     url = m.group(0)
-                    logger.info(f"↪️ Reposting reel link: {url}")
+                    logger.info(f"🎯 Reposting reel URL: {url}")
                     try:
                         self.cl.clip_upload_by_url(url, caption="")
+                        self.processed.add(msg_id)
                         reposts += 1
+                        human_delay()
                     except Exception as e:
-                        logger.error(f"❌ Reel repost failed: {e}")
-                    human_delay()
-                    self.processed.add(msg_id)
-                    if reposts >= MAX_REPOSTS:
-                        break
+                        logger.warning(f"❌ Failed to repost reel from URL: {e}")
                     continue
 
-                # 2) Photo attachment + text caption
-                if hasattr(msg, "media_share") and msg.media_share and reposts < MAX_REPOSTS:
+                # Case 2: Forwarded reel (media_share)
+                if hasattr(msg, "media_share") and msg.media_share:
                     media = msg.media_share
-                    photo_url = getattr(media, "thumbnail_url", None)
-                    if photo_url:
-                        caption = text.strip()
-                        logger.info(f"↪️ Reposting photo: {photo_url} with caption: {caption}")
+                    if getattr(media, "video_url", None):
+                        logger.info(f"↪️ Reposting forwarded reel: {media.video_url}")
                         try:
-                            self.cl.photo_upload_by_url(photo_url, caption=caption)
+                            self.cl.clip_upload_by_url(media.video_url, caption="")
+                            self.processed.add(msg_id)
                             reposts += 1
+                            human_delay()
                         except Exception as e:
-                            logger.error(f"❌ Photo repost failed: {e}")
-                        human_delay()
-                        self.processed.add(msg_id)
-                        if reposts >= MAX_REPOSTS:
-                            break
+                            logger.warning(f"❌ Failed to repost forwarded reel: {e}")
                         continue
 
-                # Mark processed anyway to avoid re-checking
-                self.processed.add(msg_id)
+                    # Case 3: Image with optional caption
+                    if getattr(media, "thumbnail_url", None):
+                        logger.info(f"🖼️ Reposting image post")
+                        try:
+                            self.cl.photo_upload_by_url(media.thumbnail_url, caption=text)
+                            self.processed.add(msg_id)
+                            reposts += 1
+                            human_delay()
+                        except Exception as e:
+                            logger.warning(f"❌ Failed to repost image: {e}")
+                        continue
 
-            if reposts >= MAX_REPOSTS:
-                break
-
-        save_json(PROCESSED_FILE, list(self.processed))
         logger.info(f"✅ Run complete. Total reposts: {reposts}")
+        save_json(list(self.processed), PROCESSED_FILE)
 
-    def run(self):
-        logger.info("🚀 Starting Instagram DM Repost Bot")
-        self.login()
-        self.process_dms()
-
+# --- Main ---
 if __name__ == "__main__":
-    InstagramBot().run()
+    bot = InstagramRepostBot()
+    bot.login()
+    bot.process_dms()
