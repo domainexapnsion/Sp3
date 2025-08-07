@@ -18,17 +18,19 @@ jobs:
       uses: actions/setup-python@v4
       with:
         python-version: '3.11'
-        cache: 'pip'
+
+    - name: Show requirements.txt (for debugging)
+      run: cat requirements.txt
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Force install correct instagrapi version
-  run: |
-    pip uninstall -y instagrapi
-    pip install instagrapi>=1.41.0
+    - name: Force correct instagrapi version
+      run: |
+        pip uninstall -y instagrapi || true
+        pip install instagrapi>=1.41.0
 
     - name: Run Instagram repost bot
       env:
