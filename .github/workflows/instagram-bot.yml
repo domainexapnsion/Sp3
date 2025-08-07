@@ -3,22 +3,22 @@ name: Instagram DM Repost Bot
 on:
   schedule:
     - cron: '0 */4 * * *'  # Run every 4 hours
-  workflow_dispatch:  # Allow manual runs
+  workflow_dispatch:      # Allow manual runs
 
 jobs:
   repost-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
+    timeout-minutes: 20   # Increased timeout
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
+        
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-
+          
       - name: Cache Python dependencies
         uses: actions/cache@v3
         with:
@@ -26,26 +26,25 @@ jobs:
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
-
+            
       - name: Show requirements.txt (for debugging)
         run: cat requirements.txt
-
-      # ✅ CORRECTED BLOCK - no hardcoded packages, just install from requirements.txt
+        
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
+          
       - name: Verify installation
         run: |
           python -c "import instagrapi; print(f'instagrapi version: {instagrapi.__version__}')"
           python -c "import pydantic; print(f'pydantic version: {pydantic.__version__}')"
-
+          
       - name: Create required files
         run: |
           touch bot.log
           echo "[]" > processed_messages.json
-
+          
       - name: Run Instagram repost bot
         env:
           INSTAGRAM_USERNAME: ${{ secrets.INSTAGRAM_USERNAME }}
@@ -54,7 +53,7 @@ jobs:
           PYTHONUNBUFFERED: 1
         run: |
           timeout 900 python bot.py || echo "Bot completed or timed out"
-
+          
       - name: Show bot logs
         if: always()
         run: |
@@ -62,7 +61,7 @@ jobs:
           cat bot.log || echo "No bot.log found"
           echo "=== PROCESSED MESSAGES ==="
           cat processed_messages.json || echo "No processed_messages.json found"
-
+          
       - name: Upload artifacts on completion
         if: always()
         uses: actions/upload-artifact@v4
@@ -73,7 +72,7 @@ jobs:
             *.json
             session.json
           retention-days: 7
-
+          
       - name: Clean up sensitive files
         if: always()
         run: |
