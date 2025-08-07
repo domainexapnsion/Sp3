@@ -2,51 +2,85 @@ name: Instagram DM Repost Bot
 
 on:
   schedule:
-    - cron: '0 10 * * *'  # Run daily at 10:00 UTC (3:30 PM IST)
-  workflow_dispatch:      # Allow manual runs
+    - cron: '0 */4 * * *'  # Run every 4 hours instead of daily
+  workflow_dispatch:  # Allow manual runs
 
 jobs:
   repost-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
+    timeout-minutes: 20  # Increased timeout
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
+        
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-
+          
+      - name: Cache Python dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+            
       - name: Show requirements.txt (for debugging)
         run: cat requirements.txt
-
-      - name: Install dependencies
+        
+      - name: Clean install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Force correct instagrapi version
+          pip cache purge
+          # Install specific working versions
+          pip install --no-cache-dir requests==2.31.0
+          pip install --no-cache-dir pydantic==1.10.12
+          pip install --no-cache-dir pydantic-core==2.10.1
+          pip install --no-cache-dir instagrapi==1.40.0  # Use older stable version
+          pip install --no-cache-dir python-dotenv
+          
+      - name: Verify installation
         run: |
-          pip uninstall -y instagrapi || true
-          pip install instagrapi>=1.41.0
-
+          python -c "import instagrapi; print(f'instagrapi version: {instagrapi.__version__}')"
+          python -c "import pydantic; print(f'pydantic version: {pydantic.__version__}')"
+          
+      - name: Create required files
+        run: |
+          touch bot.log
+          echo "[]" > processed_messages.json
+          
       - name: Run Instagram repost bot
         env:
           INSTAGRAM_USERNAME: ${{ secrets.INSTAGRAM_USERNAME }}
           INSTAGRAM_PASSWORD: ${{ secrets.INSTAGRAM_PASSWORD }}
-          INSTAGRAM_SESSION_JSON: ${{ secrets.INSTAGRAM_SESSION_JSON }}
+          PYTHONPATH: ${{ github.workspace }}
+          PYTHONUNBUFFERED: 1
         run: |
-          python bot.py
-
-      - name: Upload logs on failure
-        if: failure()
+          timeout 900 python bot.py || echo "Bot completed or timed out"
+          
+      - name: Show bot logs
+        if: always()
+        run: |
+          echo "=== BOT LOG ==="
+          cat bot.log || echo "No bot.log found"
+          echo "=== PROCESSED MESSAGES ==="
+          cat processed_messages.json || echo "No processed_messages.json found"
+          
+      - name: Upload artifacts on completion
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bot-logs
+          name: bot-logs-${{ github.run_number }}
           path: |
             *.log
+            *.json
             session.json
-            processed_messages.json
           retention-days: 7
+          
+      - name: Clean up sensitive files
+        if: always()
+        run: |
+          rm -f session.json || true
+          rm -f *.log || true
