@@ -1,13 +1,19 @@
 import os
 import json
-import re
 import logging
-import random
-import requests
+from pathlib import Path
 from time import sleep
-from urllib.parse import urlparse
 
-# --- Setup logging ---
+# The correct library for interacting with the Instagram Private API
+from instagrapi import Client
+from instagrapi.exceptions import LoginRequired
+
+# Pydantic is used by instagrapi for data models, we need to catch its errors
+from pydantic import ValidationError
+
+# --- 1. Basic Setup ---
+
+# Setup logging to see what the bot is doing
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -16,339 +22,173 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger(__name__)
 
-# --- Constants ---
-PROCESSED_FILE = "processed_messages.json"
-REEL_REGEX = re.compile(r"https?://www\.instagram\.com/reel/([A-Za-z0-9_\-]+)/?")
-POST_REGEX = re.compile(r"https?://www\.instagram\.com/p/([A-Za-z0-9_\-]+)/?")
+# Define file paths for state and session
+# Using Path for better cross-platform compatibility
+CWD = Path(__file__).resolve().parent
+PROCESSED_FILE = CWD / "processed_messages.json"
+SESSION_FILE = CWD / "session.json"
 
-# --- Utils ---
-def save_json(data, filename):
+# --- 2. Helper Functions for State Management ---
+
+def load_processed_ids(filepath: Path) -> set:
+    """Loads the set of processed message IDs from a JSON file."""
+    if not filepath.exists():
+        return set()
     try:
-        with open(filename, "w") as f:
-            json.dump(data, f, indent=2)
-        logger.info(f"💾 Saved {filename}")
-    except Exception as e:
-        logger.error(f"❌ Failed to save {filename}: {e}")
+        with open(filepath, "r") as f:
+            data = json.load(f)
+            # Ensure we return a set for fast lookups
+            return set(data)
+    except (json.JSONDecodeError, IOError) as e:
+        logging.warning(f"⚠️ Could not load processed messages from {filepath}, starting fresh: {e}")
+        return set()
 
-def load_json(filename):
+def save_processed_ids(filepath: Path, ids: set):
+    """Saves the set of processed message IDs to a JSON file."""
     try:
-        if os.path.exists(filename):
-            with open(filename, "r") as f:
-                data = json.load(f)
-                logger.info(f"📂 Loaded {filename} with {len(data)} items")
-                return data
-    except Exception as e:
-        logger.warning(f"⚠️ Failed to load {filename}: {e}")
-    return []
+        with open(filepath, "w") as f:
+            # Convert set to list for JSON serialization
+            json.dump(list(ids), f, indent=4)
+    except IOError as e:
+        logging.error(f"❌ Failed to save processed messages to {filepath}: {e}")
 
-def human_delay():
-    delay = random.uniform(10, 25)
-    logger.info(f"⏳ Waiting {delay:.1f} seconds...")
-    sleep(delay)
+# --- 3. The Main Bot Class ---
 
-# --- Minimal Instagram Client ---
-class MinimalInstagramClient:
+class RepostBot:
+    """
+    A bot to automatically repost videos/reels from DMs to stories.
+    """
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Instagram 275.0.0.27.98 Android (29/10; 300dpi; 720x1440; samsung; SM-A505F; a50; exynos9610; en_US; 458229237)',
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'X-Instagram-AJAX': '1',
-            'X-Requested-With': 'XMLHttpRequest',
-        })
-        
+        # Load credentials securely from environment variables
         self.username = os.getenv("INSTAGRAM_USERNAME")
         self.password = os.getenv("INSTAGRAM_PASSWORD")
-        self.user_id = None
-        self.csrf_token = None
-        
+
         if not self.username or not self.password:
-            raise ValueError("Missing Instagram credentials")
+            raise ValueError("❌ Missing INSTAGRAM_USERNAME or INSTAGRAM_PASSWORD environment variables.")
+
+        self.client = Client()
+        self.processed_ids = load_processed_ids(PROCESSED_FILE)
+        logging.info(f"📂 Loaded {len(self.processed_ids)} processed message IDs.")
 
     def login(self):
-        """Basic login to get session cookies"""
+        """
+        Logs into Instagram using a saved session if available,
+        otherwise performs a new login.
+        """
         try:
-            logger.info("🔐 Starting login process...")
-            
-            # Get initial page to get csrf token
-            response = self.session.get('https://www.instagram.com/')
-            if response.status_code != 200:
-                raise Exception(f"Failed to load Instagram homepage: {response.status_code}")
-            
-            # Extract csrf token
-            csrf_match = re.search(r'"csrf_token":"([^"]+)"', response.text)
-            if not csrf_match:
-                raise Exception("Could not find CSRF token")
-            
-            self.csrf_token = csrf_match.group(1)
-            logger.info(f"🔑 Got CSRF token: {self.csrf_token[:10]}...")
-            
-            # Prepare login data
-            login_data = {
-                'username': self.username,
-                'enc_password': f'#PWD_INSTAGRAM_BROWSER:0:{int(sleep(0) or time.time())}:{self.password}',
-                'queryParams': '{}',
-                'optIntoOneTap': 'false'
-            }
-            
-            login_headers = {
-                'X-CSRFToken': self.csrf_token,
-                'Referer': 'https://www.instagram.com/',
-            }
-            
-            # Perform login
-            login_response = self.session.post(
-                'https://www.instagram.com/accounts/login/ajax/',
-                data=login_data,
-                headers=login_headers
-            )
-            
-            if login_response.status_code == 200:
-                response_data = login_response.json()
-                if response_data.get('authenticated'):
-                    logger.info("✅ Login successful")
-                    self.user_id = response_data.get('userId')
-                    return True
-                else:
-                    logger.error(f"❌ Login failed: {response_data}")
-                    return False
+            if SESSION_FILE.exists():
+                logging.info("Attempting to log in using session file...")
+                self.client.load_settings(SESSION_FILE)
+                self.client.login(self.username, self.password)
+                # Check if session is still valid
+                self.client.get_timeline_feed()
+                logging.info("✅ Session login successful!")
             else:
-                logger.error(f"❌ Login request failed: {login_response.status_code}")
-                return False
-                
+                logging.info("No session file found, performing a new login...")
+                self.client.login(self.username, self.password)
+                self.client.dump_settings(SESSION_FILE)
+                logging.info("✅ New login successful, session file created.")
+        except LoginRequired:
+            logging.warning("⚠️ Session was invalid, performing a new login...")
+            self.client.login(self.username, self.password)
+            self.client.dump_settings(SESSION_FILE)
+            logging.info("✅ Re-login successful, session file updated.")
         except Exception as e:
-            logger.error(f"❌ Login error: {e}")
-            return False
+            logging.error(f"❌ An unexpected error occurred during login: {e}")
+            raise
 
-    def get_media_info_from_shortcode(self, shortcode):
-        """Get basic media info from shortcode"""
+    def repost_media_to_story(self, media_pk: str):
+        """Downloads a video and uploads it to the story."""
+        logging.info(f"📥 Downloading video with PK: {media_pk}...")
         try:
-            url = f'https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis'
-            response = self.session.get(url)
+            path = self.client.video_download(media_pk)
+            logging.info(f"✅ Download complete: {path.name}")
             
-            if response.status_code == 200:
-                data = response.json()
-                if 'items' in data and len(data['items']) > 0:
-                    return data['items'][0]
+            logging.info("📤 Uploading to story...")
+            self.client.video_upload_to_story(path)
+            logging.info("✅ Story repost successful!")
             
-            # Fallback: try different endpoint
-            url = f'https://www.instagram.com/api/v1/media/{shortcode}/info/'
-            response = self.session.get(url)
-            if response.status_code == 200:
-                data = response.json()
-                return data.get('items', [{}])[0]
-                
-            return None
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Could not get media info for {shortcode}: {e}")
-            return None
-
-    def simple_share_to_story(self, media_url, media_type="video"):
-        """Share content to story (simpler than reposting)"""
-        try:
-            if not self.csrf_token:
-                raise Exception("Not logged in")
-            
-            logger.info(f"📱 Attempting to share {media_type} to story")
-            
-            # This is a simplified version - in reality, Instagram's story sharing
-            # requires more complex API calls and media processing
-            share_data = {
-                'media_url': media_url,
-                'media_type': media_type,
-            }
-            
-            headers = {
-                'X-CSRFToken': self.csrf_token,
-                'Referer': 'https://www.instagram.com/',
-            }
-            
-            # Note: This is a placeholder - actual story sharing requires
-            # uploading media first, then creating the story
-            logger.info("📊 Story sharing requires media upload (not implemented in this minimal version)")
-            return False
-            
-        except Exception as e:
-            logger.error(f"❌ Story sharing failed: {e}")
-            return False
-
-# --- Main Bot Class ---
-class SimpleInstagramBot:
-    def __init__(self):
-        self.client = MinimalInstagramClient()
-        self.processed = set(load_json(PROCESSED_FILE))
-        
-    def process_url(self, url):
-        """Process a single Instagram URL"""
-        try:
-            logger.info(f"🔍 Processing URL: {url}")
-            
-            # Extract shortcode
-            reel_match = REEL_REGEX.search(url)
-            post_match = POST_REGEX.search(url)
-            
-            if reel_match:
-                shortcode = reel_match.group(1)
-                media_type = "reel"
-            elif post_match:
-                shortcode = post_match.group(1)
-                media_type = "post"
-            else:
-                logger.warning("⚠️ Could not extract shortcode from URL")
-                return False
-            
-            logger.info(f"📱 Extracted shortcode: {shortcode} (type: {media_type})")
-            
-            # Get media info
-            media_info = self.client.get_media_info_from_shortcode(shortcode)
-            if not media_info:
-                logger.warning("⚠️ Could not get media info")
-                return False
-            
-            logger.info(f"✅ Got media info for {shortcode}")
-            
-            # For now, just log what we would do
-            # In a full implementation, you would:
-            # 1. Download the media
-            # 2. Re-upload it as your own post
-            # 3. Or share it to your story
-            
-            logger.info(f"📝 Would repost {media_type}: {shortcode}")
-            logger.info(f"👤 Original author: {media_info.get('user', {}).get('username', 'unknown')}")
-            
-            # Simulate successful repost
+            # Clean up the downloaded file
+            path.unlink()
+            logging.info(f"🗑️ Deleted temporary file: {path.name}")
             return True
-            
         except Exception as e:
-            logger.error(f"❌ Error processing URL {url}: {e}")
+            logging.error(f"❌ Failed to repost video PK {media_pk}: {e}")
             return False
+
+    def process_direct_messages(self):
+        """
+        Fetches recent direct message threads, finds unprocessed videos,
+        and reposts them to the story.
+        """
+        logging.info("Checking for new messages in DMs...")
+        # Fetch a reasonable number of recent threads
+        threads = self.client.direct_threads(amount=20)
+        reposts_in_run = 0
+
+        for thread in threads:
+            for message in thread.messages:
+                if message.id in self.processed_ids:
+                    continue # Skip already processed messages
+
+                try:
+                    # Default media_pk to None
+                    media_pk_to_repost = None
+                    
+                    # Check if the message contains a Reel or Video
+                    # message.clip is for shared reels/posts
+                    if message.clip and message.clip.media_type == 1: # 1 = Video
+                        logging.info(f"Found a new Reel in DM from '{thread.users[0].username}': {message.clip.pk}")
+                        media_pk_to_repost = message.clip.pk
+                    
+                    # message.video is for videos sent directly
+                    elif message.video and message.video.media_type == 1:
+                        logging.info(f"Found a new Video in DM from '{thread.users[0].username}': {message.video.pk}")
+                        media_pk_to_repost = message.video.pk
+
+                    if media_pk_to_repost:
+                        if self.repost_media_to_story(media_pk_to_repost):
+                            reposts_in_run += 1
+                            sleep(15) # Wait a bit between reposts to look more human
+
+                except ValidationError as e:
+                    # THIS IS THE FIX for your original error.
+                    # It catches posts with missing data and skips them.
+                    logging.warning(f"⚠️ Skipping message {message.id} due to a data validation error (likely missing audio info). Error: {e}")
+                
+                except Exception as e:
+                    logging.error(f"❌ An unexpected error occurred while processing message {message.id}: {e}")
+                
+                finally:
+                    # Mark the message as processed whether it succeeded or failed,
+                    # to prevent trying to process a broken message repeatedly.
+                    self.processed_ids.add(message.id)
+        
+        logging.info(f"✅ DM check complete. New posts reposted in this run: {reposts_in_run}")
 
     def run(self):
-        """Main run function"""
+        """The main execution flow of the bot."""
+        logging.info("🚀 Starting Instagram Repost Bot...")
         try:
-            logger.info("🤖 Starting Simple Instagram Bot")
-            
-            # Login
-            if not self.client.login():
-                logger.error("❌ Login failed, cannot continue")
-                return
-            
-            # For demo purposes, let's process some sample URLs
-            # In reality, you would get these from DMs or another source
-            sample_urls = [
-                "https://www.instagram.com/reel/sample123/",  # Replace with actual URLs
-                "https://www.instagram.com/p/sample456/",
-            ]
-            
-            reposts = 0
-            
-            for url in sample_urls:
-                url_hash = str(hash(url))
-                if url_hash in self.processed:
-                    logger.info(f"⏭️ Skipping already processed URL: {url}")
-                    continue
-                
-                if self.process_url(url):
-                    self.processed.add(url_hash)
-                    reposts += 1
-                    human_delay()
-                else:
-                    # Still mark as processed to avoid retrying
-                    self.processed.add(url_hash)
-                    
-            # Save progress
-            save_json(list(self.processed), PROCESSED_FILE)
-            logger.info(f"✅ Bot run complete. Processed: {reposts} items")
-            
-        except Exception as e:
-            logger.error(f"❌ Fatal error in bot run: {e}")
+            self.login()
+            self.process_direct_messages()
+        finally:
+            # Always save the state of processed messages, even if an error occurs
+            save_processed_ids(PROCESSED_FILE, self.processed_ids)
+            logging.info("🤖 Bot run finished.")
 
-# --- Alternative: File-based approach ---
-def process_urls_from_file():
-    """Process URLs from a text file (simpler approach)"""
-    try:
-        urls_file = "urls_to_process.txt"
-        
-        # Create sample file if it doesn't exist
-        if not os.path.exists(urls_file):
-            with open(urls_file, "w") as f:
-                f.write("# Add Instagram URLs here, one per line\n")
-                f.write("# https://www.instagram.com/reel/example123/\n")
-                f.write("# https://www.instagram.com/p/example456/\n")
-            logger.info(f"📝 Created sample {urls_file}")
-            return
-        
-        # Read URLs from file
-        with open(urls_file, "r") as f:
-            lines = f.readlines()
-        
-        urls = [line.strip() for line in lines if line.strip() and not line.startswith("#")]
-        
-        if not urls:
-            logger.info("📭 No URLs found in file")
-            return
-        
-        logger.info(f"📋 Found {len(urls)} URLs to process")
-        
-        processed = set(load_json(PROCESSED_FILE))
-        new_reposts = 0
-        
-        for url in urls:
-            url_hash = str(hash(url))
-            if url_hash in processed:
-                logger.info(f"⏭️ Skipping: {url}")
-                continue
-            
-            logger.info(f"🔄 Processing: {url}")
-            
-            # Extract shortcode for logging
-            reel_match = REEL_REGEX.search(url)
-            post_match = POST_REGEX.search(url)
-            
-            if reel_match or post_match:
-                shortcode = (reel_match or post_match).group(1)
-                logger.info(f"📱 Shortcode: {shortcode}")
-                
-                # In a real implementation, you would:
-                # 1. Use a working Instagram library or API
-                # 2. Download the media
-                # 3. Re-upload it
-                
-                logger.info("✅ Would repost this content")
-                processed.add(url_hash)
-                new_reposts += 1
-                human_delay()
-            else:
-                logger.warning(f"⚠️ Invalid URL format: {url}")
-                processed.add(url_hash)  # Mark as processed to skip next time
-        
-        # Save progress
-        save_json(list(processed), PROCESSED_FILE)
-        logger.info(f"✅ File processing complete. New reposts: {new_reposts}")
-        
-    except Exception as e:
-        logger.error(f"❌ Error processing URLs from file: {e}")
+# --- 4. Script Execution ---
 
-# --- Main ---
 if __name__ == "__main__":
     try:
-        logger.info("🚀 Starting Instagram Bot")
-        
-        # Try the simple bot approach
-        try:
-            bot = SimpleInstagramBot()
-            bot.run()
-        except Exception as bot_error:
-            logger.error(f"❌ Bot approach failed: {bot_error}")
-            logger.info("📄 Trying file-based approach instead...")
-            process_urls_from_file()
-        
+        # Before running, ensure you have set up your environment and dependencies
+        # 1. pip install instagrapi
+        # 2. Set environment variables:
+        #    export INSTAGRAM_USERNAME="your_username"
+        #    export INSTAGRAM_PASSWORD="your_password"
+        bot = RepostBot()
+        bot.run()
     except Exception as e:
-        logger.error(f"❌ Fatal error: {e}")
+        logging.critical(f"A fatal error occurred: {e}")
         exit(1)
