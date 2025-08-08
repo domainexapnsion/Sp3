@@ -34,20 +34,18 @@ jobs:
             libffi-dev \
             libssl-dev \
             libraqm-dev
-          
+
       - name: Install Python packages
         run: |
-          pip install --upgrade pip
+          pip uninstall -y instagram || true  # Safely remove incorrect package
           pip install --no-cache-dir \
-            pillow \
             instagrapi \
             requests \
             pydantic \
-            python-dotenv
-          
+            python-dotenv \
+            pillow
+
       - name: Verify installation
         run: |
           python -c "from PIL import Image; print(f'Pillow version: {Image.__version__}')"
           python -c "import instagrapi; print(f'instagrapi version: {instagrapi.__version__}')"
-          
-      # ... rest of your steps ...
