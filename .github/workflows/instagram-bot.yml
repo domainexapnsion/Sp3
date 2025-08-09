@@ -60,7 +60,13 @@ jobs:
           pip list
 
       # This step runs your bot, providing the necessary credentials securely.
-      - name: Run the Repost Bot
+      - name: Debug imports
+        run: |
+          python -c "import sys; print('Python path:', sys.path)"
+          python -c "import instagrapi; print('instagrapi imported successfully')"
+          python -c "from instagrapi import Client; print('Client imported successfully')"
+
+      - name: Run the Bot
         env:
           INSTAGRAM_USERNAME: ${{ secrets.INSTAGRAM_USERNAME }}
           INSTAGRAM_PASSWORD: ${{ secrets.INSTAGRAM_PASSWORD }}
