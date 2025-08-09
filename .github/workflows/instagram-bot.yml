@@ -1,3 +1,6 @@
+# GitHub Actions workflow to repost Instagram DMs
+# This workflow is scheduled to run every 4 hours and can be triggered manually.
+
 name: Instagram DM Repost Bot
 
 on:
@@ -37,8 +40,12 @@ jobs:
 
       - name: Install Python packages
         run: |
-          pip uninstall -y instagram || true  # Safely remove incorrect package
-          pip install --no-cache-dir \
+          # Safely remove a potentially incorrect package to prevent conflicts.
+          pip uninstall -y instagram || true
+          
+          # Force a fresh reinstallation of all packages.
+          # This should fix the 'AttributeError' by ensuring the instagrapi package is not corrupted.
+          pip install --no-cache-dir --upgrade --force-reinstall \
             instagrapi \
             requests \
             pydantic \
@@ -48,4 +55,6 @@ jobs:
       - name: Verify installation
         run: |
           python -c "from PIL import Image; print(f'Pillow version: {Image.__version__}')"
+          # This check should now pass after the corrected installation.
           python -c "import instagrapi; print(f'instagrapi version: {instagrapi.__version__}')"
+
