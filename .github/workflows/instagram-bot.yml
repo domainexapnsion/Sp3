@@ -1,12 +1,7 @@
-# GitHub Actions workflow to repost Instagram DMs
-# This workflow is scheduled to run every 4 hours and can also be triggered manually.
-
 name: Instagram DM Repost Bot
 
 on:
   schedule:
-    # Runs at minute 0 past every 4th hour.
-    # e.g., 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC
     - cron: '0 */4 * * *'
   workflow_dispatch:
 
@@ -15,13 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
-    # We use a specific Python container to ensure a consistent environment.
     container:
       image: python:3.11-slim-bullseye
-      # Mount the repository code into the /app directory in the container.
       volumes:
         - ${{ github.workspace }}:/app
-      # We need to run as root to install system dependencies with apt-get.
       options: --user root
 
     steps:
@@ -43,30 +35,59 @@ jobs:
             libssl-dev \
             libraqm-dev
 
-      # CORRECTED STEP: Installs packages from your requirements.txt file.
-      - name: Install Python packages
-        run: |
-          # Set the working directory to where the code is mounted
-          cd /app
-          # Upgrade pip and install all packages from the requirements file
-          python -m pip install --upgrade pip
-          pip install --no-cache-dir -r requirements.txt
-        
-      # This step verifies that the key libraries were installed correctly.
-      - name: Verify installation
+      - name: Prepare & install Python packages
         run: |
           cd /app
-          python -c "from PIL import Image; print(f'Pillow version: {Image.__version__}')"
-          python -c "import instagrapi; print(f'instagrapi version: {instagrapi.__version__}')"
 
-      # NEW & ESSENTIAL STEP: Runs your actual bot script.
+          # Safety: replace the common bad placeholder if present so pip won't choke
+          if [ -f requirements.txt ]; then
+            sed -i 's/instagrapi==version/instagrapi/g' requirements.txt || true
+          fi
+
+          # Remove a conflicting package if it exists (common cause of collisions)
+          python -m pip uninstall -y instagram || true
+
+          # Upgrade pip and install
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install --no-cache-dir -r requirements.txt
+          else
+            # fallback: install minimal known-good set
+            pip install --no-cache-dir --upgrade --force-reinstall instagrapi requests "pydantic==1.9.1" python-dotenv pillow
+          fi
+
+      - name: Verify installation (debug)
+        run: |
+          cd /app
+          echo "=== pip show instagrapi ==="
+          pip show instagrapi || true
+          echo
+          echo "=== Python instagrapi debug ==="
+          python - <<'PY'
+import importlib, sys, os
+try:
+    inst = importlib.import_module("instagrapi")
+    ver = getattr(inst, "__version__", "<no __version__>")
+    file = getattr(inst, "__file__", "<no __file__>")
+    print("instagrapi __version__:", ver)
+    print("instagrapi __file__:", file)
+except Exception as e:
+    print("Failed to import instagrapi:", e)
+# List repo top-level to detect naming collisions
+print("\n=== Repo top-level files ===")
+for p in sorted(os.listdir(".")):
+    print(p)
+# Search for any local file/folder named instagrapi
+print("\n=== Searching for local instagrapi* files/folders (maxdepth 3) ===")
+import subprocess, shlex
+subprocess.call(shlex.split("find . -maxdepth 3 -name 'instagrapi*' -print"), stdout=sys.stdout, stderr=sys.stderr)
+PY
+
       - name: Run the Repost Bot
-        # Provide the username and password to the script as environment variables.
-        # These are pulled from your repository's secrets.
         env:
           INSTAGRAM_USERNAME: ${{ secrets.INSTAGRAM_USERNAME }}
           INSTAGRAM_PASSWORD: ${{ secrets.INSTAGRAM_PASSWORD }}
         run: |
           cd /app
+          # choose your bot entrypoint file if different (repost_bot.py is used here)
           python repost_bot.py
-
