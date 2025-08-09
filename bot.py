@@ -17,7 +17,6 @@ import re
 import requests
 import sys
 from pathlib import Path
-from instagrapi import Client
 
 # Attempt to import instagrapi
 try:
@@ -169,11 +168,11 @@ class InstagramRepostBot:
         Tries every possible upload method until one works. This is the brute-force part.
         """
         logger.info(f"🚀 Starting brute-force upload for {file_path.name}...")
-        
+
         # Determine potential methods based on file extension
         is_video = file_path.suffix.lower() == ".mp4"
         is_photo = file_path.suffix.lower() in [".jpg", ".jpeg"]
-        
+
         upload_methods = []
         if is_video:
             upload_methods.extend([
@@ -182,7 +181,7 @@ class InstagramRepostBot:
             ])
         if is_photo:
             upload_methods.append(("Photo (photo_upload)", self.cl.photo_upload))
-        
+
         if not upload_methods:
             logger.error(f"No upload method available for file type: {file_path.suffix}")
             return False
@@ -199,7 +198,7 @@ class InstagramRepostBot:
             except Exception as e:
                 logger.warning(f"Failed to upload as {name}. Error: {e}. Trying next method.")
                 time.sleep(1)
-        
+
         logger.error(f"❌ All upload methods failed for {file_path}.")
         return False
 
@@ -213,7 +212,7 @@ class InstagramRepostBot:
             # THIS IS THE FIX: Use private_request to get raw dictionary data
             inbox_data = self.cl.private_request("direct_v2/inbox/?persistentBadging=true&limit=20")
             threads = inbox_data.get("inbox", {}).get("threads", [])
-            
+
             if not threads:
                 logger.info("No DM threads found in inbox.")
                 return
@@ -239,28 +238,28 @@ class InstagramRepostBot:
                         continue
 
                     logger.info(f"Found shared media in thread {thread.get('thread_id')}, message {item_id}")
-                    
+
                     media_pk = media_share.get("pk")
                     caption = media_share.get("caption", {}).get("text", "") if media_share.get("caption") else ""
-                    
+
                     # Get media info robustly
                     media_info = self.get_media_info_robustly(media_pk)
                     if not media_info:
                         logger.error(f"Could not retrieve info for media PK {media_pk}. Skipping.")
                         continue
-                    
+
                     # Download the media
                     file_path = self.download_media(media_info)
                     if not file_path:
                         logger.error(f"Could not download media for PK {media_pk}. Skipping.")
                         continue
-                    
+
                     # Brute-force the upload
                     success = self.upload_bruteforce(file_path, caption)
 
                     # Cleanup
                     file_path.unlink() # Delete the downloaded file
-                    
+
                     if success:
                         reposts_count += 1
                         logger.info(f"Repost count: {reposts_count}/{MAX_REPOSTS_PER_RUN}")
