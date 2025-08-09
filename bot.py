@@ -8,9 +8,6 @@ It avoids the common PydanticValidationError by fetching DM and media data using
 low-level API calls, bypassing instagrapi's Pydantic models where they are known to fail.
 """
 
- 
-
-import instagrapi
 import os
 import json
 import time
@@ -30,8 +27,9 @@ try:
         ClientError
     )
     from instagrapi.types import Media
-except ImportError:
-    print("Error: instagrapi is not installed. Please run 'pip install instagrapi requests'")
+except ImportError as e:
+    print(f"Error: instagrapi is not installed. Error details: {e}")
+    print("Please run 'pip install instagrapi requests'")
     sys.exit(1)
 
 # --- Configuration ---
