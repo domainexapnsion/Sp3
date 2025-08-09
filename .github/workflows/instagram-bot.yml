@@ -1,7 +1,11 @@
+# FILE: .github/workflows/repost-bot.yml
+# A simplified and robust workflow for the Instagram Repost Bot.
+
 name: Instagram DM Repost Bot
 
 on:
   schedule:
+    # Runs at minute 0 past every 4th hour UTC.
     - cron: '0 */4 * * *'
   workflow_dispatch:
 
@@ -10,11 +14,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
+    # The container ensures a consistent Python environment for every run.
     container:
       image: python:3.11-slim-bullseye
       volumes:
         - ${{ github.workspace }}:/app
       options: --user root
+
+    # All commands will run inside the /app directory where your code is.
+    defaults:
+      run:
+        working-directory: /app
 
     steps:
       - name: Checkout repository
@@ -35,59 +45,22 @@ jobs:
             libssl-dev \
             libraqm-dev
 
-      - name: Prepare & install Python packages
+      # This is the simplified, correct way to install packages.
+      - name: Install Python packages
         run: |
-          cd /app
-
-          # Safety: replace the common bad placeholder if present so pip won't choke
-          if [ -f requirements.txt ]; then
-            sed -i 's/instagrapi==version/instagrapi/g' requirements.txt || true
-          fi
-
-          # Remove a conflicting package if it exists (common cause of collisions)
-          python -m pip uninstall -y instagram || true
-
-          # Upgrade pip and install
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install --no-cache-dir -r requirements.txt
-          else
-            # fallback: install minimal known-good set
-            pip install --no-cache-dir --upgrade --force-reinstall instagrapi requests "pydantic==1.9.1" python-dotenv pillow
-          fi
+          pip install --no-cache-dir -r requirements.txt
 
-      - name: Verify installation (debug)
+      - name: Verify installation
         run: |
-          cd /app
-          echo "=== pip show instagrapi ==="
-          pip show instagrapi || true
-          echo
-          echo "=== Python instagrapi debug ==="
-          python - <<'PY'
-import importlib, sys, os
-try:
-    inst = importlib.import_module("instagrapi")
-    ver = getattr(inst, "__version__", "<no __version__>")
-    file = getattr(inst, "__file__", "<no __file__>")
-    print("instagrapi __version__:", ver)
-    print("instagrapi __file__:", file)
-except Exception as e:
-    print("Failed to import instagrapi:", e)
-# List repo top-level to detect naming collisions
-print("\n=== Repo top-level files ===")
-for p in sorted(os.listdir(".")):
-    print(p)
-# Search for any local file/folder named instagrapi
-print("\n=== Searching for local instagrapi* files/folders (maxdepth 3) ===")
-import subprocess, shlex
-subprocess.call(shlex.split("find . -maxdepth 3 -name 'instagrapi*' -print"), stdout=sys.stdout, stderr=sys.stderr)
-PY
+          echo "Python version: $(python --version)"
+          echo "pip version: $(pip --version)"
+          echo "--- Installed Packages ---"
+          pip list
 
+      # This step runs your bot, providing the necessary credentials securely.
       - name: Run the Repost Bot
         env:
           INSTAGRAM_USERNAME: ${{ secrets.INSTAGRAM_USERNAME }}
           INSTAGRAM_PASSWORD: ${{ secrets.INSTAGRAM_PASSWORD }}
-        run: |
-          cd /app
-          # choose your bot entrypoint file if different (repost_bot.py is used here)
-          python repost_bot.py
+        run: python repost_bot.py
