@@ -45,7 +45,7 @@ jobs:
           
           # Force a fresh reinstallation of all packages.
           # This should fix the 'AttributeError' by ensuring the instagrapi package is not corrupted.
-          pip install --no-cache-dir --upgrade --force-reinstall \
+          pip install --no-cache-dir --upgrade -r requirements.txt
             instagrapi \
             requests \
             pydantic \
