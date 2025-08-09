@@ -1,4 +1,4 @@
-instagrapi==1.16.22
+instagrapi==version
 requests
 pydantic==1.9.1
 python-dotenv
