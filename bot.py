@@ -17,6 +17,7 @@ import re
 import requests
 import sys
 from pathlib import Path
+from instagrapi import Client
 
 # Attempt to import instagrapi
 try:
