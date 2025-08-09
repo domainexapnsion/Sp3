@@ -1,4 +1,5 @@
-instagrapi==version
+instagrapi
 requests
-pydantic==1.9.1
+pydantic
 python-dotenv
+pillow
