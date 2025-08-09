@@ -8,6 +8,17 @@ It avoids the common PydanticValidationError by fetching DM and media data using
 low-level API calls, bypassing instagrapi's Pydantic models where they are known to fail.
 """
 
+import subprocess
+import sys
+
+# Ensure instagrapi is available
+try:
+    import instagrapi
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "instagrapi", "requests"])
+    import instagrapi
+
+
 import os
 import json
 import time
