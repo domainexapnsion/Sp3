@@ -1,10 +1,12 @@
 # GitHub Actions workflow to repost Instagram DMs
-# This workflow is scheduled to run every 4 hours and can be triggered manually.
+# This workflow is scheduled to run every 4 hours and can also be triggered manually.
 
 name: Instagram DM Repost Bot
 
 on:
   schedule:
+    # Runs at minute 0 past every 4th hour.
+    # e.g., 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC
     - cron: '0 */4 * * *'
   workflow_dispatch:
 
@@ -12,17 +14,20 @@ jobs:
   repost-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    
+
+    # We use a specific Python container to ensure a consistent environment.
     container:
       image: python:3.11-slim-bullseye
+      # Mount the repository code into the /app directory in the container.
       volumes:
         - ${{ github.workspace }}:/app
+      # We need to run as root to install system dependencies with apt-get.
       options: --user root
-      
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        
+
       - name: Install system dependencies
         run: |
           apt-get update
@@ -38,23 +43,30 @@ jobs:
             libssl-dev \
             libraqm-dev
 
+      # CORRECTED STEP: Installs packages from your requirements.txt file.
       - name: Install Python packages
         run: |
-          # Safely remove a potentially incorrect package to prevent conflicts.
-          pip uninstall -y instagram || true
-          
-          # Force a fresh reinstallation of all packages.
-          # This should fix the 'AttributeError' by ensuring the instagrapi package is not corrupted.
-          pip install --no-cache-dir --upgrade -r requirements.txt
-            instagrapi \
-            requests \
-            pydantic \
-            python-dotenv \
-            pillow
-
+          # Set the working directory to where the code is mounted
+          cd /app
+          # Upgrade pip and install all packages from the requirements file
+          python -m pip install --upgrade pip
+          pip install --no-cache-dir -r requirements.txt
+        
+      # This step verifies that the key libraries were installed correctly.
       - name: Verify installation
         run: |
+          cd /app
           python -c "from PIL import Image; print(f'Pillow version: {Image.__version__}')"
-          # This check should now pass after the corrected installation.
           python -c "import instagrapi; print(f'instagrapi version: {instagrapi.__version__}')"
+
+      # NEW & ESSENTIAL STEP: Runs your actual bot script.
+      - name: Run the Repost Bot
+        # Provide the username and password to the script as environment variables.
+        # These are pulled from your repository's secrets.
+        env:
+          INSTAGRAM_USERNAME: ${{ secrets.INSTAGRAM_USERNAME }}
+          INSTAGRAM_PASSWORD: ${{ secrets.INSTAGRAM_PASSWORD }}
+        run: |
+          cd /app
+          python repost_bot.py
 
