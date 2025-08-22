@@ -1,57 +1,51 @@
-# FILE: .github/workflows/repost-bot.yml
-# A simplified and robust workflow for the Instagram Repost Bot.
+# FILE: .github/workflows/instagram-bot.yml
+# This is the final, corrected workflow.
+
 name: Instagram DM Repost Bot
+
 on:
   schedule:
-    # Runs at minute 0 past every 4th hour UTC.
-    - cron: '0 */4 * '
+    # Runs automatically every 4 hours.
+    - cron: '0 */4 * * *'
   workflow_dispatch:
+    # Allows you to run it manually from the Actions tab.
+
 jobs:
   repost-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    # The container ensures a consistent Python environment for every run.
-    container:
-      image: python:3.11-slim-bullseye
-      volumes:
-        - ${{ github.workspace }}:/app
-      options: --user root
-    # All commands will run inside the /app directory where your code is.
-    defaults:
-      run:
-        working-directory: /app
+    timeout-minutes: 15
+
     steps:
-      - name: Checkout repository
+      - name: ⬇️ Checkout repository
         uses: actions/checkout@v4
-      - name: Install system dependencies
+
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip' # Speeds up future runs by caching packages
+
+      - name: 📦 Install Python packages
+        run: pip install instagrapi requests
+
+      - name: 🔑 Restore Instagram Session from Secret
+        # This is the crucial step that uses your secret.
+        # It MUST match the name you set in Step 1.
+        env:
+          IG_SESSION_DATA: ${{ secrets.IG_SESSION_DATA }}
         run: |
-          apt-get update
-          apt-get install -y \
-            build-essential \
-            libjpeg-dev \
-            zlib1g-dev \
-            libwebp-dev \
-            libtiff5-dev \
-            libopenjp2-7-dev \
-            libfreetype6-dev \
-            libffi-dev \
-            libssl-dev \
-            libraqm-dev
-      # This is the simplified, correct way to install packages.
-      - name: Install Python packages
-        run: |
-          python -m pip install --upgrade pip
-          pip install --no-cache-dir -r requirements.txt
-          pip install instagrapi requests
-      - name: Verify installation
-        run: |
-          echo "Python version: $(python --version)"
-          echo "pip version: $(pip --version)"
-          echo "--- Installed Packages ---"
-          pip list
-      # This step runs your bot, providing the necessary credentials securely.
-      - name: Run the Repost Bot
+          echo "Restoring session from secret..."
+          if [ -z "$IG_SESSION_DATA" ]; then
+            echo "❌ Error: IG_SESSION_DATA secret is not set. Terminating."
+            exit 1
+          else
+            echo "$IG_SESSION_DATA" | base64 --decode > session.json
+            echo "✅ session.json file created successfully."
+          fi
+
+      - name: 🤖 Run the Repost Bot
+        # Provides the username/password as a fallback, though the session should be used first.
         env:
           INSTAGRAM_USERNAME: ${{ secrets.INSTAGRAM_USERNAME }}
           INSTAGRAM_PASSWORD: ${{ secrets.INSTAGRAM_PASSWORD }}
-        run: python bot.py
+        run: python3 repost_bot.py
