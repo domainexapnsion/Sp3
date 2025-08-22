@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Instagram Repost Bot - Final Version for GitHub Actions
-Description: This bot checks for unread DMs, downloads shared media (photos/videos),
-and reposts them to your account. It's optimized to use a session file for
-authentication in automated environments like GitHub Actions.
+Instagram Repost Bot - Fixed Version for Reel Handling
+Description: This bot checks for unread DMs, downloads shared media (photos/videos/reels),
+and reposts them to your account. Now properly handles sent reels from DMs.
 """
 
 import os
@@ -129,13 +128,13 @@ class InstagramRepostBot:
         Downloads media from Instagram using instagrapi's built-in functions,
         which properly handle authentication for private accounts.
         """
-        logger.info(f"📥 Downloading media item {media_pk}...")
+        logger.info(f"📥 Downloading media item {media_pk} (type: {media_type})...")
         try:
-            if media_type == 2: # Video/Clip
+            if media_type == 2:  # Video/Clip/Reel
                 return self.cl.video_download(media_pk, folder=DOWNLOADS_DIR)
-            elif media_type == 1: # Photo
+            elif media_type == 1:  # Photo
                 return self.cl.photo_download(media_pk, folder=DOWNLOADS_DIR)
-            elif media_type == 8: # Album/Carousel
+            elif media_type == 8:  # Album/Carousel
                 # Download the first item of the album
                 return self.cl.album_download(media_pk, folder=DOWNLOADS_DIR)[0]
             else:
@@ -149,14 +148,16 @@ class InstagramRepostBot:
         """Uploads the downloaded media to the bot's account."""
         logger.info(f"🚀 Reposting media from {file_path.name}...")
         try:
-            if file_path.suffix == '.mp4':
-                self.cl.clip_upload(file_path, caption)
+            if file_path.suffix.lower() in ['.mp4', '.mov', '.avi']:
+                # Use clip_upload for reels/videos
+                result = self.cl.clip_upload(file_path, caption)
+                logger.info(f"✅ Clip upload result: {result}")
             else:
-                self.cl.photo_upload(file_path, caption)
-            logger.info("✅ Repost successful!")
+                result = self.cl.photo_upload(file_path, caption)
+                logger.info(f"✅ Photo upload result: {result}")
             return True
         except Exception as e:
-            logger.error(f"💥 Repost failed: {e}")
+            logger.error(f"💥 Repost failed: {e}", exc_info=True)
             return False
 
     def run(self):
@@ -186,17 +187,51 @@ class InstagramRepostBot:
                     # Mark message as processed immediately to avoid retries on failure.
                     self.processed_ids.add(message.id)
 
-                    if message.media_share:
-                        media = message.media_share
-                        logger.info(f"Found a media share from user @{media.user.username} (PK: {media.pk})")
+                    # 🔍 DEBUG: Check what type of message this is
+                    logger.info(f"=== MESSAGE DEBUG ===")
+                    logger.info(f"Message ID: {message.id}")
+                    logger.info(f"Has media_share: {hasattr(message, 'media_share') and message.media_share is not None}")
+                    logger.info(f"Has story_share: {hasattr(message, 'story_share') and message.story_share is not None}")
+                    logger.info(f"Has clip: {hasattr(message, 'clip') and message.clip is not None}")
+                    logger.info(f"Has reel_share: {hasattr(message, 'reel_share') and message.reel_share is not None}")
+                    logger.info(f"Message text: {getattr(message, 'text', 'No text')}")
 
+                    media_to_download = None
+                    
+                    # Handle regular media shares (posts, photos)
+                    if message.media_share:
+                        media_to_download = message.media_share
+                        logger.info(f"Found regular media share from user @{media_to_download.user.username}")
+                    
+                    # 🎯 NEW: Handle story shares (this might be where reels come through)
+                    elif hasattr(message, 'story_share') and message.story_share:
+                        story = message.story_share
+                        if hasattr(story, 'media') and story.media:
+                            media_to_download = story.media
+                            logger.info(f"Found story share with media from user @{media_to_download.user.username}")
+                    
+                    # 🎯 NEW: Handle direct clip shares
+                    elif hasattr(message, 'clip') and message.clip:
+                        media_to_download = message.clip
+                        logger.info(f"Found clip share from user @{media_to_download.user.username}")
+                    
+                    # 🎯 NEW: Sometimes reels come as 'reel_share'
+                    elif hasattr(message, 'reel_share') and message.reel_share:
+                        if hasattr(message.reel_share, 'media') and message.reel_share.media:
+                            media_to_download = message.reel_share.media
+                            logger.info(f"Found reel share with media")
+
+                    # If we found media to download
+                    if media_to_download:
+                        logger.info(f"Media PK: {media_to_download.pk}, Media Type: {media_to_download.media_type}")
+                        
                         # Download the media
-                        local_path = self.download_media(media.pk, media.media_type)
+                        local_path = self.download_media(media_to_download.pk, media_to_download.media_type)
                         if not local_path:
                             continue
 
                         # Repost the media
-                        caption = media.caption_text or ""
+                        caption = getattr(media_to_download, 'caption_text', '') or ""
                         if self.repost_media(local_path, caption):
                             repost_counter += 1
                         
@@ -211,7 +246,7 @@ class InstagramRepostBot:
                         if repost_counter >= MAX_REPOSTS_PER_RUN:
                             break
                     else:
-                         logger.info(f"Message {message.id} is not a media share, skipping.")
+                        logger.info(f"Message {message.id} contains no supported media type, skipping.")
         
         except Exception as e:
             logger.critical(f"An unexpected error occurred during the run: {e}", exc_info=True)
