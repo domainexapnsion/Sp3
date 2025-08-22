@@ -130,51 +130,71 @@ class InstagramRepostBot:
             # Make a direct API call to get inbox data
             response = self.cl.private_request("direct_v2/inbox/", params={
                 "visual_message_return_type": "unseen",
-                "thread_message_limit": 5,
-                "limit": 10
+                "thread_message_limit": 20,
+                "limit": 20
             })
+            
+            logger.info(f"Raw API response status: {response is not None}")
             
             if response.get("inbox") and response["inbox"].get("threads"):
                 threads = response["inbox"]["threads"]
                 logger.info(f"Found {len(threads)} threads via raw API")
                 
-                for thread in threads:
+                for i, thread in enumerate(threads):
                     thread_id = thread.get("thread_id")
-                    logger.info(f"Checking thread {thread_id}")
+                    logger.info(f"Checking thread {i+1}/{len(threads)}: {thread_id}")
                     
                     if thread.get("items"):
-                        for item in thread["items"]:
+                        logger.info(f"Thread has {len(thread['items'])} items")
+                        for j, item in enumerate(thread["items"]):
+                            item_id = item.get("item_id", "unknown")
                             item_type = item.get("item_type", "unknown")
-                            logger.info(f"Raw message type: {item_type}")
+                            logger.info(f"  Item {j+1}: Type={item_type}, ID={item_id}")
                             
                             # Look for reel shares in raw data
-                            if "reel_share" in item:
+                            if "reel_share" in item and item["reel_share"]:
                                 logger.info("🎯 Found reel_share in raw data!")
                                 reel_data = item["reel_share"]
-                                if "media" in reel_data:
+                                logger.info(f"Reel share keys: {list(reel_data.keys())}")
+                                if "media" in reel_data and reel_data["media"]:
                                     media_pk = reel_data["media"].get("pk")
                                     logger.info(f"Reel media PK: {media_pk}")
-                                    return media_pk
+                                    if media_pk:
+                                        return media_pk
                             
                             # Look for clip shares
-                            elif "clip" in item:
+                            elif "clip" in item and item["clip"]:
                                 logger.info("🎯 Found clip in raw data!")
                                 clip_data = item["clip"]
+                                logger.info(f"Clip keys: {list(clip_data.keys())}")
                                 media_pk = clip_data.get("pk")
                                 logger.info(f"Clip media PK: {media_pk}")
-                                return media_pk
+                                if media_pk:
+                                    return media_pk
                             
                             # Look for media shares
-                            elif "media_share" in item:
+                            elif "media_share" in item and item["media_share"]:
                                 logger.info("🎯 Found media_share in raw data!")
                                 media_data = item["media_share"]
+                                logger.info(f"Media share keys: {list(media_data.keys())}")
                                 media_pk = media_data.get("pk")
                                 logger.info(f"Media share PK: {media_pk}")
-                                return media_pk
+                                if media_pk:
+                                    return media_pk
+                            
+                            # Log what we actually found
+                            else:
+                                available_keys = [key for key in item.keys() if item[key] is not None]
+                                logger.info(f"  Available keys: {available_keys}")
+                    else:
+                        logger.info(f"Thread {thread_id} has no items")
+                
+            else:
+                logger.warning("No inbox or threads found in raw API response")
                 
             return None
         except Exception as e:
-            logger.error(f"Raw API method failed: {e}")
+            logger.error(f"Raw API method failed: {e}", exc_info=True)
             return None
         """
         Downloads media from Instagram using instagrapi's built-in functions,
@@ -356,7 +376,6 @@ class InstagramRepostBot:
                             break
                     else:
                         logger.info(f"Message {message.id} contains no supported media type, skipping.")
-        
         except Exception as e:
             logger.critical(f"An unexpected error occurred during the run: {e}", exc_info=True)
         finally:
