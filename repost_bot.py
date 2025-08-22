@@ -123,7 +123,59 @@ class InstagramRepostBot:
             logger.critical(f"☠️ FATAL LOGIN FAILURE: {e}")
             return False
 
-    def download_media(self, media_pk: str, media_type: int) -> Path | None:
+    def get_raw_messages(self):
+        """Alternative method to get messages using raw API calls to avoid pydantic errors."""
+        try:
+            logger.info("🔍 Using raw API to fetch messages...")
+            # Make a direct API call to get inbox data
+            response = self.cl.private_request("direct_v2/inbox/", params={
+                "visual_message_return_type": "unseen",
+                "thread_message_limit": 5,
+                "limit": 10
+            })
+            
+            if response.get("inbox") and response["inbox"].get("threads"):
+                threads = response["inbox"]["threads"]
+                logger.info(f"Found {len(threads)} threads via raw API")
+                
+                for thread in threads:
+                    thread_id = thread.get("thread_id")
+                    logger.info(f"Checking thread {thread_id}")
+                    
+                    if thread.get("items"):
+                        for item in thread["items"]:
+                            item_type = item.get("item_type", "unknown")
+                            logger.info(f"Raw message type: {item_type}")
+                            
+                            # Look for reel shares in raw data
+                            if "reel_share" in item:
+                                logger.info("🎯 Found reel_share in raw data!")
+                                reel_data = item["reel_share"]
+                                if "media" in reel_data:
+                                    media_pk = reel_data["media"].get("pk")
+                                    logger.info(f"Reel media PK: {media_pk}")
+                                    return media_pk
+                            
+                            # Look for clip shares
+                            elif "clip" in item:
+                                logger.info("🎯 Found clip in raw data!")
+                                clip_data = item["clip"]
+                                media_pk = clip_data.get("pk")
+                                logger.info(f"Clip media PK: {media_pk}")
+                                return media_pk
+                            
+                            # Look for media shares
+                            elif "media_share" in item:
+                                logger.info("🎯 Found media_share in raw data!")
+                                media_data = item["media_share"]
+                                media_pk = media_data.get("pk")
+                                logger.info(f"Media share PK: {media_pk}")
+                                return media_pk
+                
+            return None
+        except Exception as e:
+            logger.error(f"Raw API method failed: {e}")
+            return None
         """
         Downloads media from Instagram using instagrapi's built-in functions,
         which properly handle authentication for private accounts.
@@ -167,19 +219,58 @@ class InstagramRepostBot:
 
         logger.info("📡 Checking for unread messages...")
         repost_counter = 0
+        
         try:
-            # First, let's check ALL threads (not just unread) to see what we have
-            all_threads = self.cl.direct_threads(amount=5, selected_filter='')
-            unread_threads = self.cl.direct_threads(amount=20, selected_filter='unread')
+            # Try to get unread threads first, but handle pydantic errors
+            logger.info("Attempting to fetch unread threads...")
+            try:
+                unread_threads = self.cl.direct_threads(amount=20, selected_filter='unread')
+                logger.info(f"Found {len(unread_threads)} unread threads")
+            except Exception as unread_error:
+                logger.warning(f"Failed to get unread threads: {unread_error}")
+                logger.info("Trying to get all threads instead...")
+                unread_threads = []
             
-            logger.info(f"Found {len(all_threads)} total threads, {len(unread_threads)} unread threads")
-            
-            # If no unread threads, let's check the most recent messages in all threads for debugging
-            threads_to_check = unread_threads if unread_threads else all_threads[:3]
+            # If unread failed, try getting all threads with smaller batches
+            if not unread_threads:
+                try:
+                    all_threads = self.cl.direct_threads(amount=3, selected_filter='')
+                    logger.info(f"Found {len(all_threads)} total threads")
+                    threads_to_check = all_threads
+                except Exception as all_error:
+                    logger.error(f"Failed to get any threads: {all_error}")
+                    logger.info("Trying to get threads one by one...")
+                    # As a last resort, try getting just 1 thread
+                    try:
+                        single_thread = self.cl.direct_threads(amount=1, selected_filter='')
+                        threads_to_check = single_thread
+                        logger.info(f"Got {len(threads_to_check)} thread(s) in fallback mode")
+                    except Exception as single_error:
+                        logger.critical(f"Complete failure to get threads: {single_error}")
+                        return
+            else:
+                threads_to_check = unread_threads
             
             if not threads_to_check:
                 logger.info("No threads found at all.")
                 return
+            # If normal thread fetching failed, try raw API method
+            if not threads_to_check:
+                logger.info("🆘 Normal thread fetching failed, trying raw API...")
+                raw_media_pk = self.get_raw_messages()
+                if raw_media_pk:
+                    logger.info(f"Found media via raw API: {raw_media_pk}")
+                    # Try to download and repost this media
+                    local_path = self.download_media_by_pk(raw_media_pk)
+                    if local_path:
+                        if self.repost_media(local_path, ""):
+                            repost_counter += 1
+                        local_path.unlink()
+                else:
+                    logger.info("No media found via raw API either.")
+                return
+            
+            logger.info(f"Processing {len(threads_to_check)} threads...")
             for thread in threads_to_check:
                 if repost_counter >= MAX_REPOSTS_PER_RUN:
                     logger.info(f"Repost limit of {MAX_REPOSTS_PER_RUN} reached for this run.")
