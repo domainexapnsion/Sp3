@@ -168,33 +168,41 @@ class InstagramRepostBot:
         logger.info("📡 Checking for unread messages...")
         repost_counter = 0
         try:
-            # Fetch the 20 most recent threads, looking for unread ones.
-            threads = self.cl.direct_threads(thread_count=20, selected_filter='unread')
-            if not threads:
-                logger.info("No unread message threads found.")
+            # First, let's check ALL threads (not just unread) to see what we have
+            all_threads = self.cl.direct_threads(amount=5, selected_filter='')
+            unread_threads = self.cl.direct_threads(amount=20, selected_filter='unread')
+            
+            logger.info(f"Found {len(all_threads)} total threads, {len(unread_threads)} unread threads")
+            
+            # If no unread threads, let's check the most recent messages in all threads for debugging
+            threads_to_check = unread_threads if unread_threads else all_threads[:3]
+            
+            if not threads_to_check:
+                logger.info("No threads found at all.")
                 return
-
-            logger.info(f"Found {len(threads)} unread thread(s).")
-            for thread in threads:
+            for thread in threads_to_check:
                 if repost_counter >= MAX_REPOSTS_PER_RUN:
                     logger.info(f"Repost limit of {MAX_REPOSTS_PER_RUN} reached for this run.")
                     break
 
                 for message in thread.messages:
+                    # 🔍 DEBUG: Check what type of message this is (check ALL messages for now)
+                    logger.info(f"=== MESSAGE DEBUG ===")
+                    logger.info(f"Message ID: {message.id}")
+                    logger.info(f"Item type: {getattr(message, 'item_type', 'Unknown')}")
+                    logger.info(f"Has media_share: {hasattr(message, 'media_share') and message.media_share is not None}")
+                    logger.info(f"Has story_share: {hasattr(message, 'story_share') and message.story_share is not None}")
+                    logger.info(f"Has reel_share: {hasattr(message, 'reel_share') and message.reel_share is not None}")
+                    logger.info(f"Has clip: {hasattr(message, 'clip') and message.clip is not None}")
+                    logger.info(f"Has felix_share: {hasattr(message, 'felix_share') and message.felix_share is not None}")
+                    logger.info(f"Message text: {getattr(message, 'text', 'No text')}")
+                    
                     if message.id in self.processed_ids:
+                        logger.info(f"Message {message.id} already processed, skipping.")
                         continue
 
                     # Mark message as processed immediately to avoid retries on failure.
                     self.processed_ids.add(message.id)
-
-                    # 🔍 DEBUG: Check what type of message this is
-                    logger.info(f"=== MESSAGE DEBUG ===")
-                    logger.info(f"Message ID: {message.id}")
-                    logger.info(f"Has media_share: {hasattr(message, 'media_share') and message.media_share is not None}")
-                    logger.info(f"Has story_share: {hasattr(message, 'story_share') and message.story_share is not None}")
-                    logger.info(f"Has clip: {hasattr(message, 'clip') and message.clip is not None}")
-                    logger.info(f"Has reel_share: {hasattr(message, 'reel_share') and message.reel_share is not None}")
-                    logger.info(f"Message text: {getattr(message, 'text', 'No text')}")
 
                     media_to_download = None
                     
@@ -203,23 +211,33 @@ class InstagramRepostBot:
                         media_to_download = message.media_share
                         logger.info(f"Found regular media share from user @{media_to_download.user.username}")
                     
-                    # 🎯 NEW: Handle story shares (this might be where reels come through)
+                    # 🎯 Handle story shares (this might be where reels come through)
                     elif hasattr(message, 'story_share') and message.story_share:
                         story = message.story_share
                         if hasattr(story, 'media') and story.media:
                             media_to_download = story.media
                             logger.info(f"Found story share with media from user @{media_to_download.user.username}")
                     
-                    # 🎯 NEW: Handle direct clip shares
+                    # 🎯 Handle reel shares (this is likely where sent reels are)
+                    elif hasattr(message, 'reel_share') and message.reel_share:
+                        reel = message.reel_share
+                        if hasattr(reel, 'media') and reel.media:
+                            media_to_download = reel.media
+                            logger.info(f"Found reel share with media")
+                        else:
+                            logger.info(f"Found reel share but no media attribute")
+                    
+                    # 🎯 Handle direct clip shares
                     elif hasattr(message, 'clip') and message.clip:
                         media_to_download = message.clip
                         logger.info(f"Found clip share from user @{media_to_download.user.username}")
                     
-                    # 🎯 NEW: Sometimes reels come as 'reel_share'
-                    elif hasattr(message, 'reel_share') and message.reel_share:
-                        if hasattr(message.reel_share, 'media') and message.reel_share.media:
-                            media_to_download = message.reel_share.media
-                            logger.info(f"Found reel share with media")
+                    # 🎯 Handle felix shares (IGTV/Video shares)
+                    elif hasattr(message, 'felix_share') and message.felix_share:
+                        felix = message.felix_share
+                        if hasattr(felix, 'media') and felix.media:
+                            media_to_download = felix.media
+                            logger.info(f"Found felix share with media")
 
                     # If we found media to download
                     if media_to_download:
