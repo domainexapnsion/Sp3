@@ -3,7 +3,7 @@
 Instagram Repost Bot
 - Uses an external service for reliable downloading to bypass 401 errors.
 - Falls back to the internal library method if the external service fails.
-- Improved error handling and media ID extraction.
+- Reverted to a more robust DM fetching method to find all messages.
 """
 import os
 import json
@@ -38,7 +38,7 @@ DOWNLOADS_DIR.mkdir(exist_ok=True)
 
 # --- Enhanced Operational Parameters ---
 MAX_REPOSTS_PER_RUN = 3
-NETWORK_RETRY_COUNT = 3 # Reduced retries for faster failure on persistent issues
+NETWORK_RETRY_COUNT = 3
 MIN_DELAY = 3
 MAX_DELAY = 10
 
@@ -121,32 +121,40 @@ class InstagramRepostBot:
             logger.error("❌ Credentials (INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD) not found.")
             return False
 
-    def extract_shortcode_from_url(self, url: str) -> Optional[str]:
-        if not url:
-            return None
-        patterns = [r'instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]+)']
-        for pattern in patterns:
-            match = re.search(pattern, url)
-            if match:
-                return match.group(1)
-        return None
+    def make_api_request(self, endpoint, params=None):
+        """Make API request with retry logic and error handling"""
+        for attempt in range(NETWORK_RETRY_COUNT):
+            try:
+                self.rotate_user_agent()
+                response = self.cl.private_request(endpoint, params=params or {})
+                return response
+            except Exception as e:
+                logger.warning(f"API request failed (attempt {attempt+1}): {e}")
+                if attempt < NETWORK_RETRY_COUNT - 1:
+                    wait_time = 2 ** attempt
+                    logger.info(f"Waiting {wait_time} seconds before retry...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"All API request attempts failed for {endpoint}")
+                    return None
 
-    def shortcode_to_media_id(self, shortcode: str) -> Optional[str]:
-        try:
-            media_pk = self.cl.media_pk_from_code(shortcode)
-            return str(media_pk)
-        except Exception as e:
-            logger.warning(f"Failed to convert shortcode {shortcode} to media_id: {e}")
+    def get_direct_messages(self):
+        """Get direct messages using the robust private_request method."""
+        logger.info("📨 Fetching direct messages...")
+        params = {
+            "visual_message_return_type": "unseen",
+            "thread_message_limit": 20,
+            "persistentBadging": "true",
+            "limit": 40,
+        }
+        response = self.make_api_request("direct_v2/inbox/", params)
+        if not response or 'inbox' not in response:
+            logger.error("❌ Failed to fetch direct messages or inbox not in response.")
             return None
-            
-    def get_media_info_by_any_id(self, media_id: Union[str, int]) -> Optional[Any]:
-        logger.info(f"🔍 Trying to get media info for ID: {media_id}")
-        try:
-            # instagrapi's media_info is robust and can handle various ID formats
-            return self.cl.media_info(str(media_id))
-        except Exception as e:
-            logger.warning(f"❌ Could not get media info for ID {media_id}: {e}")
-            return None
+        
+        threads = response['inbox'].get('threads', [])
+        logger.info(f"Found {len(threads)} threads in inbox.")
+        return threads
 
     def find_reels_in_messages(self, threads):
         reels = []
@@ -163,7 +171,6 @@ class InstagramRepostBot:
                 shortcode = None
                 media_type = 2 # Default to video/reel
 
-                # Standard reel/media shares often contain the full media object
                 if item.get('reel_share', {}).get('media'):
                     media = item['reel_share']['media']
                     media_id = media.get('id')
@@ -172,7 +179,6 @@ class InstagramRepostBot:
                     media = item['media_share']
                     media_id = media.get('id')
                     shortcode = media.get('code')
-                # 'clip' is a common format for reels shared in DMs
                 elif item.get('clip', {}).get('clip'):
                     media = item['clip']['clip']
                     media_id = media.get('pk')
@@ -192,21 +198,13 @@ class InstagramRepostBot:
         return reels
 
     def download_media_externally(self, shortcode: str) -> Optional[Path]:
-        """
-        NEW: Primary download method using an external service to avoid 401 errors.
-        """
+        """Primary download method using an external service."""
         logger.info(f"🌍 Attempting external download for shortcode: {shortcode}")
         insta_url = f"https://www.instagram.com/reel/{shortcode}/"
-        # Using a reliable public API endpoint for downloading social media content
         api_url = "https://api.cobalt.tools/api/json"
         
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "url": insta_url
-        }
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        payload = {"url": insta_url}
 
         try:
             response = requests.post(api_url, headers=headers, json=payload, timeout=30)
@@ -244,7 +242,6 @@ class InstagramRepostBot:
     def download_media(self, reel_data: Dict) -> Optional[Path]:
         media_id = reel_data['media_id']
         shortcode = reel_data['shortcode']
-        media_type = reel_data['media_type']
         
         logger.info(f"📥 Starting download process for reel {shortcode} (ID: {media_id})")
         self.random_delay(2, 5)
@@ -257,15 +254,9 @@ class InstagramRepostBot:
         # --- METHOD 2: INSTAGRAPI (FALLBACK) ---
         logger.warning(f"⚠️ External download failed. Falling back to internal library method for {media_id}.")
         try:
-            if media_type == 2: # Video/Reel
-                return self.cl.clip_download(media_id, folder=DOWNLOADS_DIR)
-            elif media_type == 1: # Photo
-                return self.cl.photo_download(media_id, folder=DOWNLOADS_DIR)
-            else:
-                logger.warning(f"Unknown media type {media_type}, attempting clip download.")
-                return self.cl.clip_download(media_id, folder=DOWNLOADS_DIR)
+            return self.cl.clip_download(media_id, folder=DOWNLOADS_DIR)
         except Exception as e:
-            logger.error(f"❌ All download methods failed for {media_id}. Error: {e}")
+            logger.error(f"❌ Internal download method failed for {media_id}. Error: {e}")
             return None
 
     def upload_reel(self, video_path: Path, caption="Reposted 🔄"):
@@ -297,7 +288,8 @@ class InstagramRepostBot:
             return
 
         try:
-            threads = self.cl.direct_threads(amount=20)
+            # Reverted to the more reliable DM fetching method
+            threads = self.get_direct_messages()
             if not threads:
                 logger.info("🤷 No threads found in DMs.")
                 return
@@ -330,10 +322,8 @@ class InstagramRepostBot:
                 else:
                     logger.error(f"❌ Failed to upload reel {reel['shortcode']}")
                 
-                # Mark as processed regardless of upload success to avoid retrying failed uploads
                 self.processed_ids.add(reel['item_id'])
                 
-                # Clean up downloaded file
                 try:
                     os.remove(reel_path)
                     logger.info(f"🧹 Cleaned up downloaded file: {reel_path.name}")
