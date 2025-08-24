@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Instagram Repost Bot - Enhanced DM Detection
+Instagram Repost Bot - Enhanced Clip Handling
 """
 
 import os
@@ -185,23 +185,15 @@ class InstagramRepostBot:
                         item_keys = [k for k, v in item.items() if v is not None]
                         logger.info(f"    Item keys: {item_keys}")
                         
-                        # Check for specific message types
-                        if 'reel_share' in item and item['reel_share']:
-                            logger.info("    🎯 Found reel_share!")
-                            reel_data = item['reel_share']
-                            logger.info(f"    Reel share keys: {list(reel_data.keys())}")
-                            
-                            if 'media' in reel_data and reel_data['media']:
-                                media_data = reel_data['media']
+                        # For clip items, log the clip structure
+                        if 'clip' in item and item['clip']:
+                            clip_data = item['clip']
+                            logger.info(f"    📹 Clip keys: {list(clip_data.keys())}")
+                            if 'media' in clip_data and clip_data['media']:
+                                media_data = clip_data['media']
+                                logger.info(f"    📹 Media keys: {list(media_data.keys())}")
                                 media_id = media_data.get('id')
-                                logger.info(f"    Reel media ID: {media_id}")
-                                
-                        if 'media_share' in item and item['media_share']:
-                            logger.info("    🎯 Found media_share!")
-                            media_data = item['media_share']
-                            media_id = media_data.get('id')
-                            media_type = media_data.get('media_type')
-                            logger.info(f"    Media ID: {media_id}, Type: {media_type}")
+                                logger.info(f"    📹 Media ID: {media_id}")
                 
                 return threads
             else:
@@ -258,10 +250,26 @@ class InstagramRepostBot:
                             'type': 'media_share'
                         })
                 
-                # Check for clip shares
+                # Check for clip shares - this is the key fix
                 elif 'clip' in item and item['clip']:
                     clip_data = item['clip']
-                    media_id = clip_data.get('id') or clip_data.get('pk')
+                    
+                    # Extract media ID from clip - different possible locations
+                    media_id = None
+                    
+                    # Try direct ID in clip
+                    if 'id' in clip_data:
+                        media_id = clip_data['id']
+                    
+                    # Try media object within clip
+                    elif 'media' in clip_data and clip_data['media']:
+                        media_obj = clip_data['media']
+                        if 'id' in media_obj:
+                            media_id = media_obj['id']
+                    
+                    # Try PK field
+                    elif 'pk' in clip_data:
+                        media_id = clip_data['pk']
                     
                     if media_id:
                         logger.info(f"🎯 Found clip: {media_id}")
@@ -271,6 +279,8 @@ class InstagramRepostBot:
                             'media_type': 2,
                             'type': 'clip'
                         })
+                    else:
+                        logger.info(f"❌ Clip found but no media ID: {clip_data}")
         
         return reels
 
