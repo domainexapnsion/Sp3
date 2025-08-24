@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Instagram Repost Bot - Enhanced Version with Error Handling
+Instagram Repost Bot - Enhanced DM Detection
 """
 
 import os
@@ -10,7 +10,7 @@ import random
 import logging
 import sys
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 try:
     from instagrapi import Client
@@ -140,106 +140,151 @@ class InstagramRepostBot:
                     logger.error(f"All API request attempts failed for {endpoint}")
                     return None
 
-    def get_reel_from_dms(self):
-        """Extract reel ID from direct messages using raw API response"""
-        logger.info("🔍 Checking for reels in DMs...")
+    def get_direct_messages(self):
+        """Get direct messages with detailed logging"""
+        logger.info("📨 Fetching direct messages...")
         
         params = {
             "visual_message_return_type": "unseen",
-            "thread_message_limit": 10,
+            "thread_message_limit": 20,
             "persistentBadging": "true",
-            "limit": 20
+            "limit": 40,
+            "is_prefetching": "false"
         }
         
         response = self.make_api_request("direct_v2/inbox/", params)
         if not response:
+            logger.error("❌ Failed to fetch direct messages")
             return None
             
         try:
-            threads = response.get('inbox', {}).get('threads', [])
-            logger.info(f"Found {len(threads)} threads")
+            # Log the full response structure for debugging
+            logger.info(f"API Response keys: {list(response.keys())}")
             
-            for thread in threads:
-                thread_id = thread.get('thread_id', 'unknown')
-                logger.info(f"Checking thread {thread_id}")
+            if 'inbox' in response:
+                inbox = response['inbox']
+                logger.info(f"Inbox keys: {list(inbox.keys())}")
                 
-                items = thread.get('items', [])
-                logger.info(f"Thread has {len(items)} items")
+                threads = inbox.get('threads', [])
+                logger.info(f"Found {len(threads)} threads")
                 
-                for item in items:
-                    item_id = item.get('item_id')
-                    if not item_id or item_id in self.processed_ids:
-                        continue
-                        
-                    logger.info(f"Checking item {item_id}")
+                # Log each thread for debugging
+                for i, thread in enumerate(threads):
+                    thread_id = thread.get('thread_id', 'unknown')
+                    items = thread.get('items', [])
+                    logger.info(f"Thread {i+1}: ID={thread_id}, Items={len(items)}")
                     
-                    # Check for reel share
-                    if 'reel_share' in item and item['reel_share']:
-                        reel_data = item['reel_share']
-                        media = reel_data.get('media', {})
-                        media_id = media.get('id')
+                    # Log each item in the thread
+                    for j, item in enumerate(items):
+                        item_id = item.get('item_id', 'unknown')
+                        item_type = item.get('item_type', 'unknown')
+                        user_id = item.get('user_id', 'unknown')
+                        logger.info(f"  Item {j+1}: ID={item_id}, Type={item_type}, User={user_id}")
                         
-                        if media_id:
-                            logger.info(f"🎯 Found reel share: {media_id}")
-                            self.processed_ids.add(item_id)
-                            return media_id
-                    
-                    # Check for media share (might be a reel)
-                    elif 'media_share' in item and item['media_share']:
-                        media_data = item['media_share']
-                        media_type = media_data.get('media_type')
-                        media_id = media_data.get('id')
+                        # Log all keys in the item for debugging
+                        item_keys = [k for k, v in item.items() if v is not None]
+                        logger.info(f"    Item keys: {item_keys}")
                         
-                        if media_type == 2 and media_id:  # Video type
-                            logger.info(f"🎯 Found media share (video): {media_id}")
-                            self.processed_ids.add(item_id)
-                            return media_id
-                    
-                    # Check for clip shares
-                    elif 'clip' in item and item['clip']:
-                        clip_data = item['clip']
-                        media_id = clip_data.get('pk') or clip_data.get('id')
-                        
-                        if media_id:
-                            logger.info(f"🎯 Found clip: {media_id}")
-                            self.processed_ids.add(item_id)
-                            return media_id
-                    
-                    # Log what we found for debugging
-                    else:
-                        available_keys = [k for k, v in item.items() if v is not None]
-                        logger.info(f"Item {item_id} has keys: {available_keys}")
-            
-            logger.info("🤷 No new reels found in DMs")
-            return None
+                        # Check for specific message types
+                        if 'reel_share' in item and item['reel_share']:
+                            logger.info("    🎯 Found reel_share!")
+                            reel_data = item['reel_share']
+                            logger.info(f"    Reel share keys: {list(reel_data.keys())}")
+                            
+                            if 'media' in reel_data and reel_data['media']:
+                                media_data = reel_data['media']
+                                media_id = media_data.get('id')
+                                logger.info(f"    Reel media ID: {media_id}")
+                                
+                        if 'media_share' in item and item['media_share']:
+                            logger.info("    🎯 Found media_share!")
+                            media_data = item['media_share']
+                            media_id = media_data.get('id')
+                            media_type = media_data.get('media_type')
+                            logger.info(f"    Media ID: {media_id}, Type: {media_type}")
+                
+                return threads
+            else:
+                logger.error("❌ No inbox found in response")
+                return None
                 
         except Exception as e:
-            logger.error(f"Error parsing API response: {e}")
+            logger.error(f"❌ Error parsing API response: {e}")
             return None
 
-    def download_reel(self, media_id):
-        """Download reel using media ID with error handling"""
-        try:
-            logger.info(f"📥 Downloading reel {media_id}")
+    def find_reels_in_messages(self, threads):
+        """Find reels in message threads"""
+        reels = []
+        
+        if not threads:
+            return reels
             
-            # Get media info first
-            media_info = self.cl.media_info(media_id)
-            if not media_info:
-                logger.error("❌ Could not get media info")
-                return None
+        for thread in threads:
+            thread_id = thread.get('thread_id', 'unknown')
+            items = thread.get('items', [])
+            
+            for item in items:
+                item_id = item.get('item_id')
+                if not item_id or item_id in self.processed_ids:
+                    continue
+                    
+                # Check for reel share
+                if 'reel_share' in item and item['reel_share']:
+                    reel_data = item['reel_share']
+                    media = reel_data.get('media', {})
+                    media_id = media.get('id')
+                    
+                    if media_id:
+                        logger.info(f"🎯 Found reel share: {media_id}")
+                        reels.append({
+                            'item_id': item_id,
+                            'media_id': media_id,
+                            'media_type': 2,  # Video
+                            'type': 'reel_share'
+                        })
                 
-            # Check if it's a video
-            if not media_info.is_video:
-                logger.error("❌ Media is not a video")
-                return None
+                # Check for media share (might be a reel)
+                elif 'media_share' in item and item['media_share']:
+                    media_data = item['media_share']
+                    media_id = media_data.get('id')
+                    media_type = media_data.get('media_type')
+                    
+                    if media_id and media_type == 2:  # Video type
+                        logger.info(f"🎯 Found media share (video): {media_id}")
+                        reels.append({
+                            'item_id': item_id,
+                            'media_id': media_id,
+                            'media_type': 2,
+                            'type': 'media_share'
+                        })
                 
-            # Download the video
-            reel_path = self.cl.video_download(media_id, folder=DOWNLOADS_DIR)
-            if reel_path and Path(reel_path).exists():
-                logger.info(f"✅ Downloaded to {reel_path}")
-                return reel_path
+                # Check for clip shares
+                elif 'clip' in item and item['clip']:
+                    clip_data = item['clip']
+                    media_id = clip_data.get('id') or clip_data.get('pk')
+                    
+                    if media_id:
+                        logger.info(f"🎯 Found clip: {media_id}")
+                        reels.append({
+                            'item_id': item_id,
+                            'media_id': media_id,
+                            'media_type': 2,
+                            'type': 'clip'
+                        })
+        
+        return reels
+
+    def download_media(self, media_id, media_type):
+        """Download media using media ID"""
+        try:
+            logger.info(f"📥 Downloading media {media_id} (type: {media_type})")
+            
+            if media_type == 2:  # Video/Reel
+                return self.cl.video_download(media_id, folder=DOWNLOADS_DIR)
+            elif media_type == 1:  # Photo
+                return self.cl.photo_download(media_id, folder=DOWNLOADS_DIR)
             else:
-                logger.error("❌ Download failed - file doesn't exist")
+                logger.error(f"❌ Unsupported media type: {media_type}")
                 return None
                 
         except Exception as e:
@@ -247,7 +292,7 @@ class InstagramRepostBot:
             return None
 
     def upload_reel(self, video_path, caption=""):
-        """Upload reel to your account with error handling"""
+        """Upload reel to your account"""
         try:
             logger.info("🚀 Uploading reel...")
             
@@ -258,7 +303,6 @@ class InstagramRepostBot:
             result = self.cl.clip_upload(
                 video_path, 
                 caption=caption,
-                # Additional parameters to mimic human behavior
                 extra_data={
                     "share_to_feed": True,
                     "like_and_view_counts_disabled": False,
@@ -286,33 +330,59 @@ class InstagramRepostBot:
         # Add initial delay
         self.random_delay(2, 5)
         
-        # Try to find a reel in DMs
-        media_id = self.get_reel_from_dms()
+        # Get direct messages
+        threads = self.get_direct_messages()
         
-        if media_id:
-            # Download the reel
-            reel_path = self.download_reel(media_id)
-            if reel_path:
-                # Upload the reel
-                if self.upload_reel(reel_path, "Check out this reel! 🔥"):
-                    logger.info("✅ Successfully processed reel!")
-                else:
-                    logger.error("❌ Failed to upload reel")
+        if not threads:
+            logger.info("🤷 No threads found in DMs")
+            self.save_processed_ids()
+            return
+            
+        # Find reels in messages
+        reels = self.find_reels_in_messages(threads)
+        
+        if not reels:
+            logger.info("🤷 No reels found in DMs")
+            self.save_processed_ids()
+            return
+            
+        logger.info(f"🎯 Found {len(reels)} reels to process")
+        
+        # Process each reel
+        processed_count = 0
+        for reel in reels:
+            if processed_count >= MAX_REPOSTS_PER_RUN:
+                logger.info(f"⏹️ Reached max repost limit of {MAX_REPOSTS_PER_RUN}")
+                break
                 
-                # Clean up downloaded file
-                try:
-                    os.remove(reel_path)
-                    logger.info("🧹 Cleaned up downloaded file")
-                except Exception as e:
-                    logger.error(f"❌ Failed to clean up file: {e}")
+            # Download the reel
+            reel_path = self.download_media(reel['media_id'], reel['media_type'])
+            if not reel_path:
+                logger.error(f"❌ Failed to download reel {reel['media_id']}")
+                continue
+                
+            # Upload the reel
+            if self.upload_reel(reel_path, "Check out this reel! 🔥"):
+                logger.info(f"✅ Successfully processed reel {reel['media_id']}")
+                self.processed_ids.add(reel['item_id'])
+                processed_count += 1
             else:
-                logger.error("❌ Failed to download reel")
-        else:
-            logger.info("🤷 No new reels found in DMs")
+                logger.error(f"❌ Failed to upload reel {reel['media_id']}")
+            
+            # Clean up downloaded file
+            try:
+                os.remove(reel_path)
+                logger.info("🧹 Cleaned up downloaded file")
+            except Exception as e:
+                logger.error(f"❌ Failed to clean up file: {e}")
+                
+            # Add delay between processing reels
+            if processed_count < len(reels) and processed_count < MAX_REPOSTS_PER_RUN:
+                self.random_delay(10, 30)
         
         # Save processed IDs
         self.save_processed_ids()
-        logger.info("🏁 Mission complete.")
+        logger.info(f"🏁 Mission complete. Processed {processed_count} reels.")
 
 if __name__ == "__main__":
     bot = InstagramRepostBot()
