@@ -207,12 +207,17 @@ class InstagramRepostBot:
         """Extract media ID from clip data with multiple fallback methods"""
         media_id = None
         
-        # Method 1: Direct ID in clip
-        if 'id' in clip_data:
+        # Method 1: FBID field (Facebook ID - common in clips)
+        if 'fbid' in clip_data:
+            media_id = str(clip_data['fbid'])
+            logger.info(f"    📹 Found media ID (fbid): {media_id}")
+        
+        # Method 2: Direct ID in clip
+        elif 'id' in clip_data:
             media_id = clip_data['id']
             logger.info(f"    📹 Found media ID (direct): {media_id}")
         
-        # Method 2: Media object within clip
+        # Method 3: Media object within clip
         elif 'media' in clip_data and clip_data['media']:
             media_obj = clip_data['media']
             if isinstance(media_obj, dict):
@@ -222,13 +227,16 @@ class InstagramRepostBot:
                 elif 'pk' in media_obj:
                     media_id = media_obj['pk']
                     logger.info(f"    📹 Found media ID (media.pk): {media_id}")
+                elif 'fbid' in media_obj:
+                    media_id = str(media_obj['fbid'])
+                    logger.info(f"    📹 Found media ID (media.fbid): {media_id}")
         
-        # Method 3: PK field in clip
+        # Method 4: PK field in clip
         elif 'pk' in clip_data:
             media_id = clip_data['pk']
             logger.info(f"    📹 Found media ID (pk): {media_id}")
         
-        # Method 4: Code field (convert to media ID)
+        # Method 5: Code field (convert to media ID)
         elif 'code' in clip_data:
             code = clip_data['code']
             try:
@@ -240,10 +248,10 @@ class InstagramRepostBot:
             except Exception as e:
                 logger.warning(f"    ❌ Failed to get media ID from code {code}: {e}")
         
-        # Method 5: Look for any ID-like field
+        # Method 6: Look for any ID-like field (including fbid variations)
         if not media_id:
             for key, value in clip_data.items():
-                if 'id' in key.lower() and isinstance(value, (str, int)):
+                if ('id' in key.lower() or 'fbid' in key.lower()) and isinstance(value, (str, int)):
                     media_id = str(value)
                     logger.info(f"    📹 Found media ID ({key}): {media_id}")
                     break
@@ -335,20 +343,47 @@ class InstagramRepostBot:
             # Add delay before download
             self.random_delay(2, 5)
             
+            # Convert FBID to Instagram media ID if needed
+            if len(str(media_id)) < 15:  # FBID is typically shorter
+                # Try to convert FBID to Instagram media ID
+                try:
+                    # Method 1: Try using the FBID directly with instagrapi
+                    media_info = self.cl.media_info(int(media_id))
+                    if media_info and hasattr(media_info, 'id'):
+                        actual_media_id = str(media_info.id)
+                        logger.info(f"🔄 Converted FBID {media_id} to media ID {actual_media_id}")
+                        media_id = actual_media_id
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not convert FBID {media_id}: {e}")
+                    # Continue with original ID
+            
             # Try different download methods based on media type
             if media_type == 2:  # Video/Reel
-                # Try clip download first (for reels)
+                # Method 1: Try clip download first (for reels)
                 try:
                     return self.cl.clip_download(media_id, folder=DOWNLOADS_DIR)
-                except:
-                    # Fallback to regular video download
+                except Exception as e1:
+                    logger.warning(f"Clip download failed: {e1}")
+                    
+                    # Method 2: Fallback to regular video download
                     try:
                         return self.cl.video_download(media_id, folder=DOWNLOADS_DIR)
-                    except:
-                        # Last resort - try downloading by media info
-                        media_info = self.cl.media_info(media_id)
-                        if media_info and hasattr(media_info, 'video_url'):
-                            return self.cl.video_download_by_url(media_info.video_url, folder=DOWNLOADS_DIR)
+                    except Exception as e2:
+                        logger.warning(f"Video download failed: {e2}")
+                        
+                        # Method 3: Try with integer conversion
+                        try:
+                            return self.cl.clip_download(int(media_id), folder=DOWNLOADS_DIR)
+                        except Exception as e3:
+                            logger.warning(f"Clip download (int) failed: {e3}")
+                            
+                            # Method 4: Last resort - try downloading by media info
+                            try:
+                                media_info = self.cl.media_info(media_id)
+                                if media_info and hasattr(media_info, 'video_url'):
+                                    return self.cl.video_download_by_url(media_info.video_url, folder=DOWNLOADS_DIR)
+                            except Exception as e4:
+                                logger.warning(f"Media info download failed: {e4}")
             
             elif media_type == 1:  # Photo
                 return self.cl.photo_download(media_id, folder=DOWNLOADS_DIR)
@@ -359,17 +394,31 @@ class InstagramRepostBot:
                 
         except Exception as e:
             logger.error(f"❌ Download failed for {media_id}: {e}")
-            # Try alternative download method
+            
+            # Final fallback: try different ID formats
             try:
-                logger.info(f"🔄 Trying alternative download method...")
-                media_info = self.cl.media_info(media_id)
-                if media_info:
-                    if hasattr(media_info, 'video_url') and media_info.video_url:
-                        return self.cl.video_download_by_url(media_info.video_url, folder=DOWNLOADS_DIR)
-                    elif hasattr(media_info, 'thumbnail_url') and media_info.thumbnail_url:
-                        return self.cl.photo_download_by_url(media_info.thumbnail_url, folder=DOWNLOADS_DIR)
-            except Exception as e2:
-                logger.error(f"❌ Alternative download also failed: {e2}")
+                logger.info(f"🔄 Trying final fallback download methods...")
+                
+                # Try as integer
+                if str(media_id).isdigit():
+                    try:
+                        return self.cl.clip_download(int(media_id), folder=DOWNLOADS_DIR)
+                    except:
+                        pass
+                
+                # Try getting media info first
+                try:
+                    media_info = self.cl.media_info(media_id)
+                    if media_info:
+                        if hasattr(media_info, 'video_url') and media_info.video_url:
+                            return self.cl.video_download_by_url(media_info.video_url, folder=DOWNLOADS_DIR)
+                        elif hasattr(media_info, 'thumbnail_url') and media_info.thumbnail_url:
+                            return self.cl.photo_download_by_url(media_info.thumbnail_url, folder=DOWNLOADS_DIR)
+                except Exception as e2:
+                    logger.error(f"❌ Media info fallback also failed: {e2}")
+                    
+            except Exception as e3:
+                logger.error(f"❌ All fallback methods failed: {e3}")
             
             return None
 
