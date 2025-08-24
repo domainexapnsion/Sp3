@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-Instagram Repost Bot - Enhanced Version with Better DM Detection
-- Improved DM fetching to get all conversations including older ones
-- Better reel detection across different message types
-- Enhanced logging for debugging
-- Multiple fallback methods for media detection
+Instagram Repost Bot - Back to v1 Detection + Reliable Download
+Uses v1's proven reel detection method with multiple download fallbacks
 """
 import os
 import json
@@ -14,22 +11,21 @@ import logging
 import sys
 import re
 from pathlib import Path
-from typing import Optional, Dict, Any, Union, List
+from typing import Optional, Dict, Any, Union
 
-# Attempt to import required libraries, installing them if they are missing.
 try:
     from instagrapi import Client
     from instagrapi.exceptions import LoginRequired, PleaseWaitFewMinutes, MediaNotFound
     import requests
+    import yt_dlp
 except ImportError:
-    print("Required libraries not found. Installing...")
-    os.system(f"{sys.executable} -m pip install -q instagrapi requests")
-    print("Installation complete. Please run the script again.")
+    os.system(f"{sys.executable} -m pip install -q instagrapi requests yt-dlp")
     from instagrapi import Client
     from instagrapi.exceptions import LoginRequired, PleaseWaitFewMinutes, MediaNotFound
     import requests
+    import yt_dlp
 
-# --- Configuration ---
+# Configuration
 USERNAME = os.getenv("INSTAGRAM_USERNAME")
 PASSWORD = os.getenv("INSTAGRAM_PASSWORD")
 SESSION_FILE = Path("session.json")
@@ -37,21 +33,21 @@ PROCESSED_FILE = Path("processed_messages.json")
 DOWNLOADS_DIR = Path("downloads")
 DOWNLOADS_DIR.mkdir(exist_ok=True)
 
-# --- Enhanced Operational Parameters ---
+# Enhanced operational parameters
 MAX_REPOSTS_PER_RUN = 3
-NETWORK_RETRY_COUNT = 3
+NETWORK_RETRY_COUNT = 5
 MIN_DELAY = 3
 MAX_DELAY = 10
 
-# --- User Agent Rotation ---
+# User agent rotation
 USER_AGENTS = [
     "Instagram 219.0.0.12.117 Android",
-    "Instagram 210.0.0.13.120 Android",
+    "Instagram 210.0.0.13.120 Android", 
     "Instagram 217.0.0.13.123 Android",
     "Mozilla/5.0 (Linux; Android 10; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.162 Mobile Safari/537.36"
 ]
 
-# --- Logging Setup ---
+# Logging setup
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(message)s",
@@ -89,6 +85,7 @@ class InstagramRepostBot:
         delay = random.uniform(min_seconds, max_seconds)
         logger.info(f"😴 Random delay of {delay:.2f} seconds")
         time.sleep(delay)
+        return delay
 
     def rotate_user_agent(self):
         new_agent = random.choice(USER_AGENTS)
@@ -97,138 +94,106 @@ class InstagramRepostBot:
 
     def login(self):
         logger.info("🔐 Attempting login...")
-        if SESSION_FILE.exists():
+        
+        for attempt in range(3):
             try:
-                self.cl.load_settings(SESSION_FILE)
-                self.cl.account_info() # Verify session is still valid
-                logger.info("✅ Session loaded and is valid.")
-                return True
-            except Exception as e:
-                logger.warning(f"Session expired or invalid ({e}), attempting fresh login...")
                 if SESSION_FILE.exists():
-                    SESSION_FILE.unlink() # Delete expired session
-        
-        if USERNAME and PASSWORD:
-            self.rotate_user_agent()
-            try:
-                self.cl.login(USERNAME, PASSWORD)
-                self.cl.dump_settings(SESSION_FILE)
-                logger.info("✅ Login successful.")
-                return True
-            except Exception as e:
-                logger.error(f"❌ Login failed: {e}")
-                return False
-        else:
-            logger.error("❌ Credentials (INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD) not found.")
-            return False
-
-    def get_direct_messages_enhanced(self):
-        """Enhanced DM fetching with multiple approaches"""
-        logger.info("📨 Fetching direct messages with enhanced detection...")
-        
-        # Method 1: Standard inbox fetch with broader parameters
-        try:
-            params = {
-                "visual_message_return_type": "unseen",
-                "thread_message_limit": 50,  # Increased from 20
-                "persistentBadging": "true",
-                "limit": 100,  # Increased from 40
-            }
-            response = self.cl.private_request("direct_v2/inbox/", params=params)
-            if response and 'inbox' in response:
-                threads = response['inbox'].get('threads', [])
-                logger.info(f"Method 1: Found {len(threads)} threads")
-                if threads:
-                    return threads
-        except Exception as e:
-            logger.warning(f"Method 1 failed: {e}")
-
-        # Method 2: Fetch without visual_message_return_type filter
-        try:
-            params = {
-                "thread_message_limit": 50,
-                "limit": 100,
-            }
-            response = self.cl.private_request("direct_v2/inbox/", params=params)
-            if response and 'inbox' in response:
-                threads = response['inbox'].get('threads', [])
-                logger.info(f"Method 2: Found {len(threads)} threads")
-                if threads:
-                    return threads
-        except Exception as e:
-            logger.warning(f"Method 2 failed: {e}")
-
-        # Method 3: Use instagrapi's built-in direct_threads method
-        try:
-            threads = self.cl.direct_threads(amount=100)
-            logger.info(f"Method 3: Found {len(threads)} threads using built-in method")
-            if threads:
-                # Convert to dict format for consistency
-                converted_threads = []
-                for thread in threads:
-                    thread_data = {
-                        'thread_id': thread.id,
-                        'items': []
-                    }
-                    # Get messages for each thread
+                    self.cl.load_settings(SESSION_FILE)
+                    # Verify session is still valid
                     try:
-                        messages = self.cl.direct_messages(thread.id, amount=50)
-                        for msg in messages:
-                            msg_data = {
-                                'item_id': msg.id,
-                                'timestamp': int(msg.timestamp.timestamp()),
-                                'item_type': msg.item_type if hasattr(msg, 'item_type') else None,
-                            }
-                            
-                            # Check for media shares
-                            if hasattr(msg, 'media_share') and msg.media_share:
-                                msg_data['media_share'] = {
-                                    'id': str(msg.media_share.id),
-                                    'code': msg.media_share.code,
-                                    'media_type': msg.media_share.media_type
-                                }
-                            
-                            # Check for reel shares  
-                            if hasattr(msg, 'reel_share') and msg.reel_share:
-                                msg_data['reel_share'] = {
-                                    'media': {
-                                        'id': str(msg.reel_share.id),
-                                        'code': msg.reel_share.code if hasattr(msg.reel_share, 'code') else None
-                                    }
-                                }
-                            
-                            # Check for clips
-                            if hasattr(msg, 'clip') and msg.clip:
-                                msg_data['clip'] = {
-                                    'clip': {
-                                        'pk': str(msg.clip.id),
-                                        'code': msg.clip.code if hasattr(msg.clip, 'code') else None
-                                    }
-                                }
-                            
-                            # Check for text with Instagram URLs
-                            if hasattr(msg, 'text') and msg.text:
-                                msg_data['text'] = msg.text
-                                if 'instagram.com' in msg.text or 'instagr.am' in msg.text:
-                                    msg_data['contains_instagram_url'] = True
-                            
-                            thread_data['items'].append(msg_data)
-                    except Exception as e:
-                        logger.warning(f"Failed to get messages for thread {thread.id}: {e}")
+                        self.cl.account_info()
+                        logger.info("✅ Session is valid.")
+                        return True
+                    except Exception:
+                        logger.info("Session expired, attempting fresh login...")
+                        SESSION_FILE.unlink()  # Delete expired session
+                
+                if USERNAME and PASSWORD:
+                    self.rotate_user_agent()
+                    self.cl.login(USERNAME, PASSWORD)
+                    self.cl.dump_settings(SESSION_FILE)
+                    logger.info("✅ Login successful.")
+                    return True
+                else:
+                    logger.error("❌ Credentials not found.")
+                    return False
                     
-                    converted_threads.append(thread_data)
-                return converted_threads
-        except Exception as e:
-            logger.warning(f"Method 3 failed: {e}")
+            except PleaseWaitFewMinutes as e:
+                wait_time = (attempt + 1) * 60  # Wait 1, 2, then 3 minutes
+                logger.warning(f"⏳ Instagram asked us to wait. Waiting {wait_time} seconds...")
+                time.sleep(wait_time)
+            except Exception as e:
+                logger.error(f"❌ Login attempt {attempt+1} failed: {e}")
+                if attempt < 2:
+                    self.random_delay(10, 30)
+        
+        logger.error("❌ All login attempts failed.")
+        return False
 
-        logger.error("❌ All DM fetching methods failed")
-        return None
+    def make_api_request(self, endpoint, params=None):
+        """Make API request with retry logic and error handling"""
+        for attempt in range(NETWORK_RETRY_COUNT):
+            try:
+                self.rotate_user_agent()
+                response = self.cl.private_request(endpoint, params=params or {})
+                return response
+            except Exception as e:
+                logger.warning(f"API request failed (attempt {attempt+1}): {e}")
+                if attempt < NETWORK_RETRY_COUNT - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff
+                    logger.info(f"Waiting {wait_time} seconds before retry...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"All API request attempts failed for {endpoint}")
+                    return None
+
+    def get_direct_messages(self):
+        """Get direct messages with detailed logging - V1 METHOD"""
+        logger.info("📨 Fetching direct messages...")
+        
+        params = {
+            "visual_message_return_type": "unseen",
+            "thread_message_limit": 20,
+            "persistentBadging": "true",
+            "limit": 40,
+            "is_prefetching": "false"
+        }
+        
+        response = self.make_api_request("direct_v2/inbox/", params)
+        if not response:
+            logger.error("❌ Failed to fetch direct messages")
+            return None
+            
+        try:
+            if 'inbox' in response:
+                inbox = response['inbox']
+                threads = inbox.get('threads', [])
+                logger.info(f"Found {len(threads)} threads")
+                
+                # DEBUG: Log raw thread structure
+                if threads:
+                    logger.info(f"🔍 Sample thread structure:")
+                    sample_thread = threads[0]
+                    logger.info(f"Thread keys: {list(sample_thread.keys())}")
+                    if 'items' in sample_thread and sample_thread['items']:
+                        sample_item = sample_thread['items'][0]
+                        logger.info(f"Sample item keys: {list(sample_item.keys())}")
+                
+                return threads
+            else:
+                logger.error("❌ No inbox found in response")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Error parsing API response: {e}")
+            return None
 
     def extract_shortcode_from_url(self, url: str) -> Optional[str]:
         """Extract Instagram shortcode from URL"""
         if not url:
             return None
         
+        # Match Instagram URL patterns
         patterns = [
             r'instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]+)',
             r'instagr\.am/p/([A-Za-z0-9_-]+)',
@@ -241,283 +206,412 @@ class InstagramRepostBot:
         
         return None
 
+    def shortcode_to_media_id(self, shortcode: str) -> Optional[str]:
+        """Convert Instagram shortcode to media ID"""
+        try:
+            media_info = self.cl.media_info_by_shortcode(shortcode)
+            if media_info:
+                return str(media_info.id)
+        except Exception as e:
+            logger.warning(f"Failed to convert shortcode {shortcode}: {e}")
+        return None
+
+    def extract_media_id_from_clip(self, clip_data: Dict) -> Optional[str]:
+        """Extract media ID from clip data - V1 METHOD"""
+        logger.info(f"🔍 Extracting media ID from clip data...")
+        
+        # Method 1: Look for 'id' field in clip data
+        if 'id' in clip_data:
+            media_id = str(clip_data['id']).split('_')[0]  # Remove user ID part
+            logger.info(f"✅ Found media ID (clip.id): {media_id}")
+            return media_id
+        
+        # Method 2: Look for 'pk' field
+        if 'pk' in clip_data:
+            media_id = str(clip_data['pk'])
+            logger.info(f"✅ Found media ID (clip.pk): {media_id}")
+            return media_id
+        
+        # Method 3: Look for 'code' field (shortcode)
+        if 'code' in clip_data:
+            shortcode = clip_data['code']
+            media_id = self.shortcode_to_media_id(shortcode)
+            if media_id:
+                logger.info(f"✅ Found media ID from shortcode {shortcode}: {media_id}")
+                return media_id
+        
+        # Method 4: Look for nested media object
+        if 'clip' in clip_data and isinstance(clip_data['clip'], dict):
+            nested_clip = clip_data['clip']
+            
+            # Check nested clip for ID fields
+            for id_field in ['id', 'pk', 'media_id', 'fbid']:
+                if id_field in nested_clip:
+                    media_id = str(nested_clip[id_field]).split('_')[0]
+                    logger.info(f"✅ Found media ID (nested clip.{id_field}): {media_id}")
+                    return media_id
+        
+        logger.warning("❌ Could not extract media ID from clip data")
+        return None
+
     def find_reels_in_messages(self, threads):
-        """Enhanced reel detection across all message types"""
+        """Find reels in message threads - V1 METHOD"""
         reels = []
+        
         if not threads:
             return reels
-        
-        logger.info(f"🔍 Scanning {len(threads)} threads for reels...")
-        
-        total_items_checked = 0
-        for thread_idx, thread in enumerate(threads):
-            thread_id = thread.get('thread_id', f'thread_{thread_idx}')
+            
+        for thread in threads:
+            thread_id = thread.get('thread_id', 'unknown')
             items = thread.get('items', [])
-            logger.info(f"📱 Thread {thread_idx + 1}: Checking {len(items)} messages")
             
             for item in items:
-                total_items_checked += 1
                 item_id = item.get('item_id')
                 if not item_id:
                     continue
-                
+                    
                 # Skip if already processed
                 if item_id in self.processed_ids:
-                    logger.debug(f"⭐ Skipping already processed item: {item_id}")
+                    logger.info(f"⭐️ Skipping already processed item: {item_id}")
                     continue
-
+                
+                # Check for different types of reel shares
                 media_id = None
-                shortcode = None
-                media_type = 2  # Default to video/reel
                 reel_type = None
-
-                # Method 1: Direct media share
-                if item.get('media_share'):
-                    media = item['media_share']
+                
+                # Method 1: Check for reel share
+                if 'reel_share' in item and item['reel_share']:
+                    reel_data = item['reel_share']
+                    media = reel_data.get('media', {})
                     media_id = media.get('id')
-                    shortcode = media.get('code')
-                    media_type = media.get('media_type', 2)
-                    reel_type = 'media_share'
-                    logger.info(f"🎯 Found media_share: {shortcode} (ID: {media_id})")
-
-                # Method 2: Reel share
-                elif item.get('reel_share', {}).get('media'):
-                    media = item['reel_share']['media']
-                    media_id = media.get('id')
-                    shortcode = media.get('code')
                     reel_type = 'reel_share'
-                    logger.info(f"🎯 Found reel_share: {shortcode} (ID: {media_id})")
-
-                # Method 3: Clip share
-                elif item.get('clip', {}).get('clip'):
-                    media = item['clip']['clip']
-                    media_id = media.get('pk')
-                    shortcode = media.get('code')
+                    
+                    if media_id:
+                        logger.info(f"🎯 Found reel share: {media_id}")
+                
+                # Method 2: Check for media share (might be a reel)
+                elif 'media_share' in item and item['media_share']:
+                    media_data = item['media_share']
+                    media_id = media_data.get('id')
+                    media_type = media_data.get('media_type')
+                    reel_type = 'media_share'
+                    
+                    if media_id and media_type == 2:  # Video type
+                        logger.info(f"🎯 Found media share (video): {media_id}")
+                
+                # Method 3: Check for clip shares - V1 DETECTION
+                elif 'clip' in item and item['clip']:
+                    clip_data = item['clip']
                     reel_type = 'clip'
-                    logger.info(f"🎯 Found clip: {shortcode} (ID: {media_id})")
-
-                # Method 4: Text messages with Instagram URLs
-                elif item.get('text') or item.get('contains_instagram_url'):
-                    text = item.get('text', '')
-                    if 'instagram.com' in text or 'instagr.am' in text:
-                        shortcode = self.extract_shortcode_from_url(text)
-                        if shortcode:
-                            reel_type = 'text_url'
-                            logger.info(f"🎯 Found Instagram URL in text: {shortcode}")
-                            # We'll get the media_id later via shortcode
-
-                # Method 5: Check all string values in item for Instagram URLs
-                else:
-                    for key, value in item.items():
-                        if isinstance(value, str) and ('instagram.com' in value or 'instagr.am' in value):
-                            shortcode = self.extract_shortcode_from_url(value)
-                            if shortcode:
-                                reel_type = f'url_in_{key}'
-                                logger.info(f"🎯 Found Instagram URL in {key}: {shortcode}")
-                                break
-
-                # If we have either media_id or shortcode, add to reels
-                if media_id or shortcode:
-                    reel_data = {
+                    
+                    # Use V1 media ID extraction
+                    media_id = self.extract_media_id_from_clip(clip_data)
+                    
+                    if media_id:
+                        logger.info(f"🎯 Found clip with media ID: {media_id}")
+                
+                # If we found a media ID, add to reels list
+                if media_id and reel_type:
+                    reels.append({
                         'item_id': item_id,
-                        'media_id': str(media_id) if media_id else None,
-                        'shortcode': shortcode,
-                        'media_type': media_type,
+                        'media_id': str(media_id),
+                        'media_type': 2,  # Assume video for clips
                         'type': reel_type,
-                        'timestamp': item.get('timestamp', 0),
-                        'thread_id': thread_id
-                    }
-                    
-                    # If we only have shortcode, try to get media_id
-                    if not media_id and shortcode:
-                        try:
-                            media_info = self.cl.media_info_by_shortcode(shortcode)
-                            if media_info:
-                                reel_data['media_id'] = str(media_info.id)
-                                reel_data['media_type'] = media_info.media_type
-                                logger.info(f"✅ Got media_id from shortcode: {media_info.id}")
-                        except Exception as e:
-                            logger.warning(f"⚠️ Could not get media_id for shortcode {shortcode}: {e}")
-                    
-                    reels.append(reel_data)
-        
-        logger.info(f"📊 Checked {total_items_checked} total messages across {len(threads)} threads")
+                        'timestamp': item.get('timestamp', 0)
+                    })
+                    logger.info(f"✅ Added reel: {media_id} (type: {reel_type})")
         
         # Sort reels by timestamp (newest first)
         reels.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
         
-        # Log summary
-        if reels:
-            logger.info(f"🎉 Found {len(reels)} reels:")
-            for i, reel in enumerate(reels[:5]):  # Show first 5
-                logger.info(f"  {i+1}. {reel['shortcode']} ({reel['type']}) - ID: {reel.get('media_id', 'Unknown')}")
-            if len(reels) > 5:
-                logger.info(f"  ... and {len(reels) - 5} more")
-        
         return reels
 
-    def download_media_externally(self, shortcode: str) -> Optional[Path]:
-        """Primary download method using an external service."""
-        logger.info(f"🌐 Attempting external download for shortcode: {shortcode}")
-        insta_url = f"https://www.instagram.com/reel/{shortcode}/"
-        api_url = "https://api.cobalt.tools/api/json"
-        
-        headers = {"Accept": "application/json", "Content-Type": "application/json"}
-        payload = {"url": insta_url}
-
+    def download_with_yt_dlp(self, media_id: str) -> Optional[Path]:
+        """Download using yt-dlp as primary method"""
         try:
-            response = requests.post(api_url, headers=headers, json=payload, timeout=30)
-            response.raise_for_status()
-            data = response.json()
-
-            if data.get("status") == "stream":
-                video_url = data.get("url")
-                if not video_url:
-                    logger.error("❌ External API returned a stream status but no URL.")
-                    return None
-                
-                logger.info(f"✅ External service provided video URL. Downloading...")
-                video_response = requests.get(video_url, stream=True, timeout=60)
-                video_response.raise_for_status()
-                
-                file_path = DOWNLOADS_DIR / f"{shortcode}.mp4"
-                with open(file_path, "wb") as f:
-                    for chunk in video_response.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                
-                logger.info(f"✅ External download successful. Saved to: {file_path}")
-                return file_path
-            else:
-                logger.error(f"❌ External service failed. Status: {data.get('status')}, Text: {data.get('text')}")
-                return None
-
-        except requests.exceptions.RequestException as e:
-            logger.error(f"❌ External download request failed: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"❌ An unexpected error occurred during external download: {e}")
-            return None
-
-    def download_media(self, reel_data: Dict) -> Optional[Path]:
-        media_id = reel_data.get('media_id')
-        shortcode = reel_data.get('shortcode')
-        
-        logger.info(f"🔥 Starting download process for reel {shortcode} (ID: {media_id})")
-        self.random_delay(2, 5)
-
-        # Ensure we have a shortcode for external download
-        if not shortcode and media_id:
+            logger.info(f"📥 Trying yt-dlp download for media ID: {media_id}")
+            
+            # Try to get shortcode first
+            shortcode = None
             try:
                 media_info = self.cl.media_info(media_id)
                 shortcode = media_info.code
-                logger.info(f"📝 Got shortcode from media_id: {shortcode}")
-            except Exception as e:
-                logger.warning(f"⚠️ Could not get shortcode for media_id {media_id}: {e}")
-
-        # --- METHOD 1: EXTERNAL DOWNLOADER (PRIMARY) ---
-        if shortcode:
-            external_path = self.download_media_externally(shortcode)
-            if external_path:
-                return external_path
-
-        # --- METHOD 2: INSTAGRAPI (FALLBACK) ---
-        if media_id:
-            logger.warning(f"⚠️ External download failed. Falling back to internal library method for {media_id}.")
-            try:
-                return self.cl.clip_download(media_id, folder=DOWNLOADS_DIR)
-            except Exception as e:
-                logger.error(f"❌ Internal download method failed for {media_id}. Error: {e}")
-                # Try video download as final fallback
-                try:
-                    return self.cl.video_download(media_id, folder=DOWNLOADS_DIR)
-                except Exception as e2:
-                    logger.error(f"❌ Video download also failed: {e2}")
+                logger.info(f"📝 Got shortcode: {shortcode}")
+            except:
+                logger.warning("Could not get shortcode, will try with media_id")
+            
+            # Build Instagram URL
+            if shortcode:
+                url = f"https://www.instagram.com/reel/{shortcode}/"
+            else:
+                url = f"https://www.instagram.com/p/{media_id}/"
+            
+            # yt-dlp options
+            ydl_opts = {
+                'outtmpl': str(DOWNLOADS_DIR / f'{media_id}.%(ext)s'),
+                'format': 'best[ext=mp4]/best',
+                'quiet': True,
+                'no_warnings': True,
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+            
+            # Find the downloaded file
+            for file in DOWNLOADS_DIR.glob(f'{media_id}.*'):
+                logger.info(f"✅ yt-dlp download successful: {file}")
+                return file
+                
+        except Exception as e:
+            logger.warning(f"⚠️ yt-dlp download failed: {e}")
         
-        logger.error(f"❌ All download methods failed for reel")
         return None
 
-    def upload_reel(self, video_path: Path, caption="Reposted 🔥"):
+    def download_with_cobalt(self, media_id: str) -> Optional[Path]:
+        """Download using cobalt.tools API"""
+        try:
+            logger.info(f"🌐 Trying cobalt.tools download for media ID: {media_id}")
+            
+            # Try to get shortcode first
+            shortcode = None
+            try:
+                media_info = self.cl.media_info(media_id)
+                shortcode = media_info.code
+            except:
+                pass
+            
+            if not shortcode:
+                logger.warning("No shortcode available for cobalt download")
+                return None
+            
+            url = f"https://www.instagram.com/reel/{shortcode}/"
+            api_url = "https://api.cobalt.tools/api/json"
+            
+            headers = {"Accept": "application/json", "Content-Type": "application/json"}
+            payload = {"url": url}
+            
+            response = requests.post(api_url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            
+            if data.get("status") == "stream":
+                video_url = data.get("url")
+                if video_url:
+                    video_response = requests.get(video_url, stream=True, timeout=60)
+                    video_response.raise_for_status()
+                    
+                    file_path = DOWNLOADS_DIR / f"{media_id}.mp4"
+                    with open(file_path, "wb") as f:
+                        for chunk in video_response.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                    
+                    logger.info(f"✅ Cobalt download successful: {file_path}")
+                    return file_path
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Cobalt download failed: {e}")
+        
+        return None
+
+    def download_with_instagrapi(self, media_id: str) -> Optional[Path]:
+        """Download using instagrapi as fallback"""
+        try:
+            logger.info(f"📱 Trying instagrapi download for media ID: {media_id}")
+            
+            # Try clip download first
+            try:
+                result = self.cl.clip_download(media_id, folder=DOWNLOADS_DIR)
+                if result:
+                    logger.info(f"✅ Instagrapi clip download successful: {result}")
+                    return result
+            except:
+                pass
+            
+            # Try video download
+            try:
+                result = self.cl.video_download(media_id, folder=DOWNLOADS_DIR)
+                if result:
+                    logger.info(f"✅ Instagrapi video download successful: {result}")
+                    return result
+            except:
+                pass
+            
+            # Try with integer ID
+            try:
+                result = self.cl.clip_download(int(media_id), folder=DOWNLOADS_DIR)
+                if result:
+                    logger.info(f"✅ Instagrapi int download successful: {result}")
+                    return result
+            except:
+                pass
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Instagrapi download failed: {e}")
+        
+        return None
+
+    def download_media(self, media_id, media_type):
+        """Download media using multiple reliable methods"""
+        logger.info(f"🔥 Attempting to download media {media_id} (type: {media_type})")
+        
+        # Add delay before download
+        self.random_delay(2, 5)
+        
+        # Method 1: yt-dlp (most reliable)
+        result = self.download_with_yt_dlp(media_id)
+        if result:
+            return result
+        
+        # Method 2: Cobalt.tools API
+        result = self.download_with_cobalt(media_id)
+        if result:
+            return result
+        
+        # Method 3: Instagrapi fallback
+        result = self.download_with_instagrapi(media_id)
+        if result:
+            return result
+        
+        logger.error(f"❌ All download methods failed for {media_id}")
+        return None
+
+    def upload_reel(self, video_path, caption="Reposted 🔥"):
+        """Upload reel to your account with better error handling"""
         try:
             logger.info(f"🚀 Uploading reel from {video_path}")
-            if not video_path.exists() or video_path.stat().st_size == 0:
-                logger.error(f"❌ Video file is missing or empty: {video_path}")
+            
+            # Verify file exists and has content
+            if not os.path.exists(video_path):
+                logger.error(f"❌ Video file not found: {video_path}")
                 return False
             
+            file_size = os.path.getsize(video_path)
+            if file_size == 0:
+                logger.error(f"❌ Video file is empty: {video_path}")
+                return False
+            
+            logger.info(f"📁 Video file size: {file_size} bytes")
+            
+            # Add a random delay before uploading
             self.random_delay(5, 15)
             
-            result = self.cl.clip_upload(
-                video_path,
-                caption=caption,
-                extra_data={"share_to_feed": True}
-            )
-            if result:
-                logger.info(f"✅ Reel uploaded successfully! Media ID: {result.id}")
-                return True
+            # Try uploading as a clip first
+            try:
+                result = self.cl.clip_upload(
+                    video_path, 
+                    caption=caption,
+                    extra_data={
+                        "share_to_feed": True,
+                        "like_and_view_counts_disabled": False,
+                        "disable_comments": False,
+                    }
+                )
+                
+                if result:
+                    logger.info(f"✅ Reel uploaded successfully! Media ID: {result.id}")
+                    return True
+                
+            except Exception as e:
+                logger.warning(f"⚠️ Clip upload failed: {e}")
+                
+                # Fallback to video upload
+                try:
+                    result = self.cl.video_upload(
+                        video_path,
+                        caption=caption
+                    )
+                    
+                    if result:
+                        logger.info(f"✅ Video uploaded successfully! Media ID: {result.id}")
+                        return True
+                        
+                except Exception as e2:
+                    logger.error(f"❌ Video upload also failed: {e2}")
+            
+            logger.error("❌ All upload methods failed")
             return False
+            
         except Exception as e:
             logger.error(f"❌ Critical upload error: {e}")
             return False
 
     def run(self):
+        """Main execution method"""
         logger.info("🚀 Starting Instagram Repost Bot...")
+        
         if not self.login():
-            logger.error("❌ Cannot proceed without login. Exiting.")
+            logger.error("❌ Cannot proceed without login")
             return
 
+        # Add initial delay
+        self.random_delay(2, 5)
+        
         try:
-            # Enhanced DM fetching
-            threads = self.get_direct_messages_enhanced()
-            if not threads:
-                logger.info("🤷 No threads found in DMs with any method.")
-                return
+            # Get direct messages using V1 method
+            threads = self.get_direct_messages()
             
-            reels = self.find_reels_in_messages(threads)
-            if not reels:
-                logger.info("🤷 No new, unprocessed reels found in DMs.")
+            if not threads:
+                logger.info("🤷 No threads found in DMs")
+                self.save_processed_ids()
                 return
                 
-            logger.info(f"🎯 Found {len(reels)} new reels to process.")
+            # Find reels in messages using V1 method
+            reels = self.find_reels_in_messages(threads)
             
+            if not reels:
+                logger.info("🤷 No reels found in DMs")
+                self.save_processed_ids()
+                return
+                
+            logger.info(f"🎯 Found {len(reels)} reels to process")
+            
+            # Process each reel
             processed_count = 0
             for i, reel in enumerate(reels):
                 if processed_count >= MAX_REPOSTS_PER_RUN:
-                    logger.info(f"ℹ️ Reached max repost limit of {MAX_REPOSTS_PER_RUN}.")
+                    logger.info(f"ℹ️ Reached max repost limit of {MAX_REPOSTS_PER_RUN}")
                     break
+                    
+                logger.info(f"🔄 Processing reel {i+1}/{len(reels)}: {reel['media_id']}")
                 
-                logger.info(f"--- Processing reel {i+1}/{len(reels)} (Shortcode: {reel.get('shortcode', 'Unknown')}) ---")
-                
-                reel_path = self.download_media(reel)
+                # Download the reel
+                reel_path = self.download_media(reel['media_id'], reel['media_type'])
                 if not reel_path:
-                    logger.error(f"❌ Failed to download reel {reel.get('shortcode', reel.get('media_id'))}. Skipping.")
+                    logger.error(f"❌ Failed to download reel {reel['media_id']}")
+                    # Mark as processed to avoid retrying
                     self.processed_ids.add(reel['item_id'])
                     continue
-                
+                    
+                # Upload the reel
                 caption = f"Amazing reel! 🔥\n\n#repost #viral #reel"
                 if self.upload_reel(reel_path, caption):
-                    logger.info(f"✅ Successfully processed reel {reel.get('shortcode', reel.get('media_id'))}")
+                    logger.info(f"✅ Successfully processed reel {reel['media_id']}")
                     processed_count += 1
                 else:
-                    logger.error(f"❌ Failed to upload reel {reel.get('shortcode', reel.get('media_id'))}")
+                    logger.error(f"❌ Failed to upload reel {reel['media_id']}")
                 
+                # Mark as processed
                 self.processed_ids.add(reel['item_id'])
                 
+                # Clean up downloaded file
                 try:
                     os.remove(reel_path)
-                    logger.info(f"🧹 Cleaned up downloaded file: {reel_path.name}")
+                    logger.info(f"🧹 Cleaned up file: {reel_path}")
                 except Exception as e:
-                    logger.warning(f"⚠️ Failed to clean up file: {e}")
+                    logger.warning(f"⚠️ Failed to clean up: {e}")
                 
-                if i < len(reels) - 1 and processed_count < MAX_REPOSTS_PER_RUN:
-                    self.random_delay(15, 45)
+                # Add delay between processing
+                if i < len(reels) - 1:
+                    self.random_delay(10, 30)
             
-            logger.info(f"🏁 Mission complete! Processed {processed_count} reels in this run.")
+            logger.info(f"🏁 Completed! Processed {processed_count}/{len(reels)} reels.")
             
         except Exception as e:
-            logger.error(f"❌ Critical error in main execution: {e}", exc_info=True)
+            logger.error(f"❌ Critical error in main execution: {e}")
             
         finally:
             self.save_processed_ids()
-            logger.info("💾 Saved processed IDs.")
+            logger.info("💾 Processed IDs saved.")
 
 if __name__ == "__main__":
     bot = InstagramRepostBot()
