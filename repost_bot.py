@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Instagram Repost Bot - Fixed Version with Improved Media ID Extraction and Robust Downloading
+Instagram Repost Bot - Robust Version with Adaptive API Handling
 """
 import os
 import json
@@ -12,15 +12,18 @@ import re
 import subprocess
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Union
+from datetime import datetime
 
 try:
     from instagrapi import Client
-    from instagrapi.exceptions import LoginRequired, PleaseWaitFewMinutes, MediaNotFound
+    from instagrapi.exceptions import LoginRequired, PleaseWaitFewMinutes, MediaNotFound, ClientError
+    from instagrapi.types import DirectThread, DirectMessage
     import requests
 except ImportError:
     os.system(f"{sys.executable} -m pip install -q instagrapi requests yt-dlp")
     from instagrapi import Client
-    from instagrapi.exceptions import LoginRequired, PleaseWaitFewMinutes, MediaNotFound
+    from instagrapi.exceptions import LoginRequired, PleaseWaitFewMinutes, MediaNotFound, ClientError
+    from instagrapi.types import DirectThread, DirectMessage
     import requests
 
 # Configuration
@@ -36,6 +39,7 @@ MAX_REPOSTS_PER_RUN = 3
 NETWORK_RETRY_COUNT = 5
 MIN_DELAY = 3
 MAX_DELAY = 10
+API_RETRY_DELAYS = [1, 2, 4, 8, 16]  # Exponential backoff
 
 # User agent rotation
 USER_AGENTS = [
@@ -61,6 +65,7 @@ class InstagramRepostBot:
         self.cl = Client()
         self.cl.delay_range = [MIN_DELAY, MAX_DELAY]
         self.processed_ids = self.load_processed_ids()
+        self.api_endpoints = self.load_api_endpoints()
         logger.info(f"Bot initialized. Previously processed {len(self.processed_ids)} messages.")
 
     def load_processed_ids(self):
@@ -79,6 +84,40 @@ class InstagramRepostBot:
         except Exception as e:
             logger.error(f"Failed to save processed IDs: {e}")
 
+    def load_api_endpoints(self):
+        """Load API endpoints with fallbacks for Instagram API changes"""
+        endpoints_file = Path("api_endpoints.json")
+        default_endpoints = {
+            "inbox": "direct_v2/inbox/",
+            "current_user": "accounts/current_user/",
+            "challenge": "challenge/",
+            "threads": "direct_v2/threads/",
+            "text_broadcast": "direct_v2/threads/broadcast/text/"
+        }
+        
+        if endpoints_file.exists():
+            try:
+                with endpoints_file.open('r') as f:
+                    return {**default_endpoints, **json.load(f)}
+            except Exception:
+                return default_endpoints
+        return default_endpoints
+
+    def save_api_endpoints(self):
+        """Save current API endpoints to file"""
+        try:
+            with Path("api_endpoints.json").open('w') as f:
+                json.dump(self.api_endpoints, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Could not save API endpoints: {e}")
+
+    def rotate_user_agent(self):
+        """Rotate user agent to appear more human"""
+        new_agent = random.choice(USER_AGENTS)
+        self.cl.set_user_agent(new_agent)
+        logger.info(f"🔄 Rotated user agent to: {new_agent}")
+        return new_agent
+
     def random_delay(self, min_seconds=2, max_seconds=8):
         """Add a random delay between requests"""
         delay = random.uniform(min_seconds, max_seconds)
@@ -86,11 +125,41 @@ class InstagramRepostBot:
         time.sleep(delay)
         return delay
 
-    def rotate_user_agent(self):
-        """Rotate user agent to appear more human"""
-        new_agent = random.choice(USER_AGENTS)
-        self.cl.set_user_agent(new_agent)
-        logger.info(f"🔄 Rotated user agent to: {new_agent}")
+    def adaptive_request(self, func, *args, **kwargs):
+        """Make adaptive requests with retry logic and endpoint fallback"""
+        last_error = None
+        
+        for attempt in range(NETWORK_RETRY_COUNT):
+            try:
+                self.rotate_user_agent()
+                result = func(*args, **kwargs)
+                return result
+            except ClientError as e:
+                last_error = e
+                if "404" in str(e) or "Not Found" in str(e):
+                    logger.warning(f"API endpoint may have changed: {e}")
+                    # We'll handle this in the main logic
+                    break
+                elif "429" in str(e) or "Too Many Requests" in str(e):
+                    wait_time = (attempt + 1) * 30  # Wait longer for rate limits
+                    logger.warning(f"⏳ Rate limited. Waiting {wait_time} seconds...")
+                    time.sleep(wait_time)
+                else:
+                    logger.warning(f"API request failed (attempt {attempt+1}): {e}")
+                    if attempt < NETWORK_RETRY_COUNT - 1:
+                        wait_time = API_RETRY_DELAYS[attempt]
+                        logger.info(f"Waiting {wait_time} seconds before retry...")
+                        time.sleep(wait_time)
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Request failed (attempt {attempt+1}): {e}")
+                if attempt < NETWORK_RETRY_COUNT - 1:
+                    wait_time = API_RETRY_DELAYS[attempt]
+                    logger.info(f"Waiting {wait_time} seconds before retry...")
+                    time.sleep(wait_time)
+        
+        logger.error(f"All request attempts failed: {last_error}")
+        return None
 
     def login(self):
         """Handle authentication with retries and error handling"""
@@ -102,19 +171,25 @@ class InstagramRepostBot:
                     self.cl.load_settings(SESSION_FILE)
                     # Verify session is still valid
                     try:
-                        self.cl.account_info()
-                        logger.info("✅ Session is valid.")
-                        return True
+                        user_info = self.adaptive_request(self.cl.account_info)
+                        if user_info:
+                            logger.info(f"✅ Session is valid. Logged in as: {user_info.username}")
+                            return True
+                        else:
+                            raise Exception("Failed to get account info")
                     except Exception:
                         logger.info("Session expired, attempting fresh login...")
                         SESSION_FILE.unlink()  # Delete expired session
                 
                 if USERNAME and PASSWORD:
                     self.rotate_user_agent()
-                    self.cl.login(USERNAME, PASSWORD)
-                    self.cl.dump_settings(SESSION_FILE)
-                    logger.info("✅ Login successful.")
-                    return True
+                    login_result = self.adaptive_request(self.cl.login, USERNAME, PASSWORD)
+                    if login_result:
+                        self.cl.dump_settings(SESSION_FILE)
+                        logger.info("✅ Login successful.")
+                        return True
+                    else:
+                        raise Exception("Login returned None")
                 else:
                     logger.error("❌ Credentials not found.")
                     return False
@@ -131,26 +206,26 @@ class InstagramRepostBot:
         logger.error("❌ All login attempts failed.")
         return False
 
-    def make_api_request(self, endpoint, params=None):
-        """Make API request with retry logic and error handling"""
-        for attempt in range(NETWORK_RETRY_COUNT):
-            try:
-                self.rotate_user_agent()
-                response = self.cl.private_request(endpoint, params=params or {})
-                return response
-            except Exception as e:
-                logger.warning(f"API request failed (attempt {attempt+1}): {e}")
-                if attempt < NETWORK_RETRY_COUNT - 1:
-                    wait_time = 2 ** attempt  # Exponential backoff
-                    logger.info(f"Waiting {wait_time} seconds before retry...")
-                    time.sleep(wait_time)
-                else:
-                    logger.error(f"All API request attempts failed for {endpoint}")
-                    return None
-
     def get_direct_messages(self):
-        """Get direct messages with detailed logging"""
+        """Get direct messages with multiple fallback strategies"""
         logger.info("📨 Fetching direct messages...")
+        
+        # Strategy 1: Use instagrapi's built-in methods (most reliable)
+        try:
+            threads = self.adaptive_request(self.cl.direct_threads)
+            if threads:
+                logger.info(f"✅ Found {len(threads)} threads using built-in method")
+                return self.format_threads(threads)
+        except Exception as e:
+            logger.warning(f"Built-in method failed: {e}")
+        
+        # Strategy 2: Try different API endpoints
+        endpoints_to_try = [
+            self.api_endpoints["inbox"],
+            "direct_v2/inbox/",
+            "api/v1/direct_v2/inbox/",
+            "direct/inbox/",
+        ]
         
         params = {
             "visual_message_return_type": "unseen",
@@ -160,25 +235,80 @@ class InstagramRepostBot:
             "is_prefetching": "false"
         }
         
-        response = self.make_api_request("direct_v2/inbox/", params)
-        if not response:
-            logger.error("❌ Failed to fetch direct messages")
-            return None
+        for endpoint in endpoints_to_try:
+            try:
+                logger.info(f"🔄 Trying endpoint: {endpoint}")
+                response = self.adaptive_request(self.cl.private_request, endpoint, params=params)
+                
+                if response and 'inbox' in response:
+                    inbox = response['inbox']
+                    threads = inbox.get('threads', [])
+                    logger.info(f"✅ Found {len(threads)} threads using endpoint: {endpoint}")
+                    
+                    # Update our endpoints if this worked
+                    if endpoint != self.api_endpoints["inbox"]:
+                        self.api_endpoints["inbox"] = endpoint
+                        self.save_api_endpoints()
+                    
+                    return threads
+            except Exception as e:
+                logger.warning(f"Endpoint {endpoint} failed: {e}")
+                continue
+        
+        logger.error("❌ All methods to fetch direct messages failed")
+        return None
+
+    def format_threads(self, threads: List[DirectThread]):
+        """Format instagrapi threads to match expected structure"""
+        formatted_threads = []
+        
+        for thread in threads:
+            formatted_thread = {
+                'thread_id': thread.id,
+                'items': []
+            }
             
-        try:
-            if 'inbox' in response:
-                inbox = response['inbox']
-                threads = inbox.get('threads', [])
-                logger.info(f"Found {len(threads)} threads")
+            try:
+                messages = self.adaptive_request(self.cl.direct_messages, thread.id)
+                if not messages:
+                    continue
+                    
+                for msg in messages:
+                    formatted_item = {
+                        'item_id': f"{thread.id}_{msg.id}",
+                        'timestamp': msg.timestamp.timestamp() if hasattr(msg.timestamp, 'timestamp') else int(msg.timestamp),
+                        'user_id': msg.user_id
+                    }
+                    
+                    # Add message content based on type
+                    if msg.item_type == 'text':
+                        formatted_item['text'] = msg.text
+                    elif msg.item_type == 'media_share' and msg.media_share:
+                        formatted_item['media_share'] = {
+                            'id': msg.media_share.id,
+                            'code': getattr(msg.media_share, 'code', None),
+                            'media_type': getattr(msg.media_share, 'media_type', None)
+                        }
+                    elif msg.item_type == 'clip':
+                        formatted_item['clip'] = {
+                            'id': getattr(msg, 'id', None),
+                            'code': getattr(msg, 'code', None)
+                        }
+                    elif msg.item_type == 'link':
+                        formatted_item['link'] = {
+                            'link_url': getattr(msg, 'link_url', None),
+                            'url': getattr(msg, 'url', None)
+                        }
+                    
+                    formatted_thread['items'].append(formatted_item)
+                    
+            except Exception as e:
+                logger.warning(f"Failed to process thread {thread.id}: {e}")
+                continue
                 
-                return threads
-            else:
-                logger.error("❌ No inbox found in response")
-                return None
-                
-        except Exception as e:
-            logger.error(f"❌ Error parsing API response: {e}")
-            return None
+            formatted_threads.append(formatted_thread)
+        
+        return formatted_threads
 
     def extract_shortcode_from_url(self, url: str) -> Optional[str]:
         """Extract Instagram shortcode from URL"""
@@ -201,7 +331,7 @@ class InstagramRepostBot:
     def shortcode_to_media_id(self, shortcode: str) -> Optional[str]:
         """Convert Instagram shortcode to media ID"""
         try:
-            media_info = self.cl.media_info_by_shortcode(shortcode)
+            media_info = self.adaptive_request(self.cl.media_info_by_shortcode, shortcode)
             if media_info:
                 return str(media_info.id)
         except Exception as e:
@@ -280,14 +410,14 @@ class InstagramRepostBot:
         
         # Method 1: Try as-is
         try:
-            return self.cl.media_info(media_id_str)
+            return self.adaptive_request(self.cl.media_info, media_id_str)
         except Exception as e:
             logger.debug(f"Failed with original ID: {e}")
         
         # Method 2: Try as integer
         if media_id_str.isdigit():
             try:
-                return self.cl.media_info(int(media_id_str))
+                return self.adaptive_request(self.cl.media_info, int(media_id_str))
             except Exception as e:
                 logger.debug(f"Failed with integer ID: {e}")
         
@@ -295,7 +425,7 @@ class InstagramRepostBot:
         if '_' in media_id_str:
             try:
                 first_part = media_id_str.split('_')[0]
-                return self.cl.media_info(first_part)
+                return self.adaptive_request(self.cl.media_info, first_part)
             except Exception as e:
                 logger.debug(f"Failed with first part {first_part}: {e}")
         
@@ -328,19 +458,8 @@ class InstagramRepostBot:
                 reel_type = None
                 shortcode = None
 
-                # Method 1: Check for reel share
-                if 'reel_share' in item and item['reel_share']:
-                    reel_data = item['reel_share']
-                    media = reel_data.get('media', {})
-                    media_id = media.get('id')
-                    shortcode = media.get('code')
-                    reel_type = 'reel_share'
-                    
-                    if media_id:
-                        logger.info(f"🎯 Found reel share: {media_id}")
-                
-                # Method 2: Check for media share (might be a reel)
-                elif 'media_share' in item and item['media_share']:
+                # Method 1: Check for media share (might be a reel)
+                if 'media_share' in item and item['media_share']:
                     media_data = item['media_share']
                     media_id = media_data.get('id')
                     shortcode = media_data.get('code')
@@ -350,7 +469,7 @@ class InstagramRepostBot:
                     if media_id and media_type == 2:  # Video type
                         logger.info(f"🎯 Found media share (video): {media_id}")
                 
-                # Method 3: Check for clip shares - IMPROVED DETECTION
+                # Method 2: Check for clip shares
                 elif 'clip' in item and item['clip']:
                     clip_data = item['clip']
                     reel_type = 'clip'
@@ -366,7 +485,7 @@ class InstagramRepostBot:
                         logger.warning(f"❌ Clip found but no media ID extractable")
                         continue
                 
-                # Method 4: Check for link items that might be Instagram URLs
+                # Method 3: Check for link items that might be Instagram URLs
                 elif 'link' in item and item['link']:
                     link_data = item['link']
                     url = link_data.get('link_url') or link_data.get('url')
@@ -388,7 +507,7 @@ class InstagramRepostBot:
                             'media_type': media_info.media_type,
                             'type': reel_type,
                             'timestamp': item.get('timestamp', 0),
-                            'shortcode': getattr(media_info, 'code', shortcode) # Prioritize verified shortcode
+                            'shortcode': getattr(media_info, 'code', shortcode)
                         })
                         logger.info(f"✅ Verified and added reel: {media_info.id} (type: {reel_type})")
                     else:
@@ -431,7 +550,7 @@ class InstagramRepostBot:
                 
                 logger.info(f"🔄 Trying download with yt-dlp: {url}")
                 # Execute the command
-                subprocess.run(command, check=True, capture_output=True, text=True)
+                subprocess.run(command, check=True, capture_output=True, text=True, timeout=120)
                 
                 # Find the downloaded file
                 for file in DOWNLOADS_DIR.glob(f"{shortcode}.*"):
@@ -443,6 +562,8 @@ class InstagramRepostBot:
 
             except subprocess.CalledProcessError as e:
                 logger.warning(f"yt-dlp failed. Stderr: {e.stderr.strip()}")
+            except subprocess.TimeoutExpired:
+                logger.warning("yt-dlp timed out after 2 minutes")
             except Exception as e:
                 logger.warning(f"An unexpected error occurred with yt-dlp: {e}")
         else:
@@ -456,13 +577,13 @@ class InstagramRepostBot:
             if media_info:
                 actual_media_id = str(media_info.id)
                 if media_info.media_type == 2:  # Video/Reel
-                    return self.cl.clip_download(actual_media_id, folder=DOWNLOADS_DIR)
+                    return self.adaptive_request(self.cl.clip_download, actual_media_id, folder=DOWNLOADS_DIR)
                 elif media_info.media_type == 1:  # Photo
-                    return self.cl.photo_download(actual_media_id, folder=DOWNLOADS_DIR)
+                    return self.adaptive_request(self.cl.photo_download, actual_media_id, folder=DOWNLOADS_DIR)
             
             # If media_info fails, try a blind download
             logger.warning("Could not get media info, trying blind clip download...")
-            return self.cl.clip_download(media_id, folder=DOWNLOADS_DIR)
+            return self.adaptive_request(self.cl.clip_download, media_id, folder=DOWNLOADS_DIR)
 
         except Exception as e:
             logger.error(f"❌ All download methods failed for {media_id}: {e}")
@@ -490,7 +611,8 @@ class InstagramRepostBot:
             
             # Try uploading as a clip first
             try:
-                result = self.cl.clip_upload(
+                result = self.adaptive_request(
+                    self.cl.clip_upload,
                     video_path, 
                     caption=caption,
                     extra_data={
@@ -509,7 +631,8 @@ class InstagramRepostBot:
                 
                 # Fallback to video upload
                 try:
-                    result = self.cl.video_upload(
+                    result = self.adaptive_request(
+                        self.cl.video_upload,
                         video_path,
                         caption=caption
                     )
@@ -585,6 +708,14 @@ class InstagramRepostBot:
                 
                 # Mark as processed regardless of success
                 self.processed_ids.add(reel['item_id'])
+                
+                # Clean up downloaded file
+                try:
+                    if os.path.exists(reel_path):
+                        os.remove(reel_path)
+                        logger.info(f"🧹 Cleaned up downloaded file: {reel_path}")
+                except Exception as e:
+                    logger.warning(f"Could not clean up file {reel_path}: {e}")
                 
                 # Add delay between processing reels
                 if i < len(reels) - 1:
